@@ -1228,85 +1228,94 @@
   // LEGEND
   // ==============================
   function updateMapKey() {
-    if (!mapKeyEl) return;
-    const { mw: showMW, ord: showOrd } = colorToggles();
+  if (!mapKeyEl) return;
+  const { mw: showMW, ord: showOrd } = colorToggles();
 
-    // Small inline CSS to keep styles self-contained
-    const css = `
-      <style>
-        .legend { font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding:10px; }
-        .legend .title { font-weight: 800; margin-bottom: 6px; }
-        .legend .subtitle { color:#6b7280; margin-bottom: 8px; }
-        .legend .row { display:flex; align-items:center; gap:8px; margin:6px 0; }
-        .legend .swatch { width:14px; height:14px; border-radius:3px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
-        .legend .bar { display:flex; gap:2px; }
-        .legend .bar .swatch { width:24px; height:14px; }
-        .legend .axis { display:flex; align-items:center; justify-content:space-between; color:#6b7280; margin-top:4px; }
-        .legend .grid { display:grid; grid-template-columns: repeat(3, 18px); grid-template-rows: repeat(3, 18px); gap:3px; }
-        .legend .grid .cell { width:18px; height:18px; border-radius:3px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
-        .legend .axes { display:flex; gap:12px; align-items:flex-end; }
-        .legend .axis-col { display:flex; flex-direction:column; align-items:center; gap:4px; }
-        .legend .axis-row { display:flex; align-items:center; gap:4px; }
-      </style>
-    `;
+  // Local CSS for the key only (no rotations, no odd spacing)
+  const css = `
+    <style>
+      .legend { font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding:10px; }
+      .legend .title { font-weight: 800; margin-bottom: 6px; color:#0b1b3f; }
+      .legend .subtitle { color:#6b7280; margin-bottom: 10px; }
 
-    if (showMW && showOrd) {
-      // Bivariate legend (3x3)
-      const gridCells = []
-        .concat(BIV9[0], BIV9[1], BIV9[2])
-        .map(c => `<div class="cell" style="background:${c}"></div>`)
-        .join('');
+      /* Combined layout */
+      .legend .bi { display:flex; gap:10px; align-items:flex-start; }
+      .legend .ylabels { display:flex; flex-direction:column; align-items:flex-start; gap:4px; height:60px; }
+      .legend .ylabels .spacer { flex:1; }
+      .legend .ylabels .side { color:#6b7280; }
+      .legend .ylabels .axis-title { font-weight:600; color:#0b1b3f; margin-top:6px; }
 
-      mapKeyEl.innerHTML = css + `
-        <div class="legend">
-          <div class="title">Combined</div>
-          <div class="subtitle">Energy Capacity × Ordinance Workability</div>
-          <div style="display:flex; gap:12px;">
+      .legend .grid { display:grid; grid-template-columns: repeat(3, 18px); grid-template-rows: repeat(3, 18px); gap:3px; }
+      .legend .cell { width:18px; height:18px; border-radius:3px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
+
+      .legend .xlabel { display:flex; justify-content:space-between; color:#6b7280; margin-top:6px; }
+      .legend .xtitle { text-align:center; font-weight:600; color:#0b1b3f; margin-top:2px; }
+
+      /* Univariate bars (unchanged) */
+      .legend .bar { display:flex; gap:2px; }
+      .legend .bar .swatch { width:24px; height:14px; border-radius:3px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
+      .legend .axis { display:flex; align-items:center; justify-content:space-between; color:#6b7280; margin-top:4px; }
+    </style>
+  `;
+
+  if (showMW && showOrd) {
+    // Build the 3×3 grid with ROWS REVERSED so top = ordinance HIGH
+    // BIV9 rows are defined low→high; reverse them for the legend.
+    const rowsForLegend = [BIV9[2], BIV9[1], BIV9[0]];
+    const gridCells = rowsForLegend.map(
+      row => row.map(c => `<div class="cell" style="background:${c}"></div>`).join('')
+    ).join('');
+
+    mapKeyEl.innerHTML = css + `
+      <div class="legend">
+        <div class="title">Combined</div>
+        <div class="subtitle">Energy Capacity × Ordinance Workability</div>
+
+        <div class="bi">
+          <div class="ylabels" aria-hidden="true">
+            <div class="side">High</div>
+            <div class="spacer"></div>
+            <div class="side">Low</div>
+            <div class="axis-title">Ordinance</div>
+          </div>
+
+          <div>
             <div class="grid" aria-label="Bivariate legend grid">${gridCells}</div>
-            <div class="axes">
-              <div class="axis-col">
-                <div class="axis" style="writing-mode:vertical-rl; transform:rotate(180deg); height:70px;">High</div>
-                <div style="height:70px;"></div>
-                <div class="axis" style="writing-mode:vertical-rl; transform:rotate(180deg); height:70px;">Low</div>
-                <div style="font-weight:600;margin-top:4px;">Ordinance</div>
-              </div>
-              <div>
-                <div class="axis-row"><span style="color:#6b7280;">Low</span><span style="flex:1;"></span><span style="color:#6b7280;">High</span></div>
-                <div class="axis" style="font-weight:600; justify-content:center;">Energy Capacity</div>
-              </div>
-            </div>
+            <div class="xlabel"><span>Low</span><span>High</span></div>
+            <div class="xtitle">Energy Capacity</div>
           </div>
         </div>
-      `;
-    } else if (showMW) {
-      // Energy-only legend
-      mapKeyEl.innerHTML = css + `
-        <div class="legend">
-          <div class="title">Energy Capacity</div>
-          <div class="subtitle">Active MW (quintiles)</div>
-          <div class="bar">${COLORS_MW_5.map(c=>`<div class="swatch" style="background:${c}"></div>`).join('')}</div>
-          <div class="axis"><span>Low</span><span>High</span></div>
-        </div>
-      `;
-    } else if (showOrd) {
-      // Ordinance-only legend
-      mapKeyEl.innerHTML = css + `
-        <div class="legend">
-          <div class="title">Ordinance Workability</div>
-          <div class="subtitle">Average of enabled tech scores (quintiles)</div>
-          <div class="bar">${COLORS_ORD_5.map(c=>`<div class="swatch" style="background:${c}"></div>`).join('')}</div>
-          <div class="axis"><span>Low</span><span>High</span></div>
-        </div>
-      `;
-    } else {
-      mapKeyEl.innerHTML = css + `
-        <div class="legend">
-          <div class="title">No color layers active</div>
-          <div class="subtitle">Enable Energy and/or Ordinance in “Map Coloring”.</div>
-        </div>
-      `;
-    }
+      </div>
+    `;
+  } else if (showMW) {
+    // Energy-only legend (unchanged)
+    mapKeyEl.innerHTML = css + `
+      <div class="legend">
+        <div class="title">Energy Capacity</div>
+        <div class="subtitle">Active MW (quintiles)</div>
+        <div class="bar">${COLORS_MW_5.map(c=>`<div class="swatch" style="background:${c}"></div>`).join('')}</div>
+        <div class="axis"><span>Low</span><span>High</span></div>
+      </div>
+    `;
+  } else if (showOrd) {
+    // Ordinance-only legend (unchanged)
+    mapKeyEl.innerHTML = css + `
+      <div class="legend">
+        <div class="title">Ordinance Workability</div>
+        <div class="subtitle">Average of enabled tech scores (quintiles)</div>
+        <div class="bar">${COLORS_ORD_5.map(c=>`<div class="swatch" style="background:${c}"></div>`).join('')}</div>
+        <div class="axis"><span>Low</span><span>High</span></div>
+      </div>
+    `;
+  } else {
+    mapKeyEl.innerHTML = css + `
+      <div class="legend">
+        <div class="title">No color layers active</div>
+        <div class="subtitle">Enable Energy and/or Ordinance in “Map Coloring”.</div>
+      </div>
+    `;
   }
+}
 
   // ==============================
   // HELPERS
