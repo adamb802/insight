@@ -1231,22 +1231,30 @@
   if (!mapKeyEl) return;
   const { mw: showMW, ord: showOrd } = colorToggles();
 
-  // Local CSS for the key only (no rotations, no odd spacing)
   const css = `
     <style>
       .legend { font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding:10px; }
       .legend .title { font-weight: 800; margin-bottom: 6px; color:#0b1b3f; }
       .legend .subtitle { color:#6b7280; margin-bottom: 10px; }
 
+      :root { --cell:18px; --gap:3px; }
+
       /* Combined layout */
       .legend .bi { display:flex; gap:10px; align-items:flex-start; }
-      .legend .ylabels { display:flex; flex-direction:column; align-items:flex-start; gap:4px; height:60px; }
-      .legend .ylabels .spacer { flex:1; }
-      .legend .ylabels .side { color:#6b7280; }
-      .legend .ylabels .axis-title { font-weight:600; color:#0b1b3f; margin-top:6px; }
+      .legend .ycol { display:flex; flex-direction:column; align-items:flex-start; }
+      .legend .yticks {
+        display:flex; flex-direction:column; justify-content:space-between;
+        height: calc(var(--cell)*3 + var(--gap)*2);
+        color:#6b7280;
+      }
+      .legend .ytitle { font-weight:600; color:#0b1b3f; margin-top:6px; }
 
-      .legend .grid { display:grid; grid-template-columns: repeat(3, 18px); grid-template-rows: repeat(3, 18px); gap:3px; }
-      .legend .cell { width:18px; height:18px; border-radius:3px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
+      .legend .grid { display:grid;
+        grid-template-columns: repeat(3, var(--cell));
+        grid-template-rows: repeat(3, var(--cell));
+        gap: var(--gap);
+      }
+      .legend .cell { width:var(--cell); height:var(--cell); border-radius:3px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
 
       .legend .xlabel { display:flex; justify-content:space-between; color:#6b7280; margin-top:6px; }
       .legend .xtitle { text-align:center; font-weight:600; color:#0b1b3f; margin-top:2px; }
@@ -1259,8 +1267,7 @@
   `;
 
   if (showMW && showOrd) {
-    // Build the 3×3 grid with ROWS REVERSED so top = ordinance HIGH
-    // BIV9 rows are defined low→high; reverse them for the legend.
+    // Bivariate legend: top row = ordinance HIGH (so reverse the rows)
     const rowsForLegend = [BIV9[2], BIV9[1], BIV9[0]];
     const gridCells = rowsForLegend.map(
       row => row.map(c => `<div class="cell" style="background:${c}"></div>`).join('')
@@ -1268,15 +1275,13 @@
 
     mapKeyEl.innerHTML = css + `
       <div class="legend">
-        <div class="title">Combined</div>
-        <div class="subtitle">Energy Capacity × Ordinance Workability</div>
-
         <div class="bi">
-          <div class="ylabels" aria-hidden="true">
-            <div class="side">High</div>
-            <div class="spacer"></div>
-            <div class="side">Low</div>
-            <div class="axis-title">Ordinance</div>
+          <div class="ycol">
+            <div class="yticks" aria-hidden="true">
+              <span>High</span>
+              <span>Low</span>
+            </div>
+            <div class="ytitle">Ordinance Workability</div>
           </div>
 
           <div>
@@ -1288,7 +1293,7 @@
       </div>
     `;
   } else if (showMW) {
-    // Energy-only legend (unchanged)
+    // Energy-only legend
     mapKeyEl.innerHTML = css + `
       <div class="legend">
         <div class="title">Energy Capacity</div>
@@ -1298,7 +1303,7 @@
       </div>
     `;
   } else if (showOrd) {
-    // Ordinance-only legend (unchanged)
+    // Ordinance-only legend
     mapKeyEl.innerHTML = css + `
       <div class="legend">
         <div class="title">Ordinance Workability</div>
@@ -1316,7 +1321,6 @@
     `;
   }
 }
-
   // ==============================
   // HELPERS
   // ==============================
