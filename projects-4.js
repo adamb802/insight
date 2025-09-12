@@ -1239,15 +1239,14 @@
 
       :root { --cell:18px; --gap:3px; }
 
-      /* Combined layout */
       .legend .bi { display:flex; gap:10px; align-items:flex-start; }
       .legend .ycol { display:flex; flex-direction:column; align-items:flex-start; }
+      .legend .ytitle { font-weight:600; color:#0b1b3f; margin-bottom:6px; } /* moved to top */
       .legend .yticks {
         display:flex; flex-direction:column; justify-content:space-between;
         height: calc(var(--cell)*3 + var(--gap)*2);
         color:#6b7280;
       }
-      .legend .ytitle { font-weight:600; color:#0b1b3f; margin-top:6px; }
 
       .legend .grid { display:grid;
         grid-template-columns: repeat(3, var(--cell));
@@ -1259,7 +1258,6 @@
       .legend .xlabel { display:flex; justify-content:space-between; color:#6b7280; margin-top:6px; }
       .legend .xtitle { text-align:center; font-weight:600; color:#0b1b3f; margin-top:2px; }
 
-      /* Univariate bars (unchanged) */
       .legend .bar { display:flex; gap:2px; }
       .legend .bar .swatch { width:24px; height:14px; border-radius:3px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
       .legend .axis { display:flex; align-items:center; justify-content:space-between; color:#6b7280; margin-top:4px; }
@@ -1267,8 +1265,7 @@
   `;
 
   if (showMW && showOrd) {
-    // Bivariate legend: top row = ordinance HIGH (so reverse the rows)
-    const rowsForLegend = [BIV9[2], BIV9[1], BIV9[0]];
+    const rowsForLegend = [BIV9[2], BIV9[1], BIV9[0]]; // top row = ordinance HIGH
     const gridCells = rowsForLegend.map(
       row => row.map(c => `<div class="cell" style="background:${c}"></div>`).join('')
     ).join('');
@@ -1277,11 +1274,11 @@
       <div class="legend">
         <div class="bi">
           <div class="ycol">
+            <div class="ytitle">Ordinance Workability</div>
             <div class="yticks" aria-hidden="true">
               <span>High</span>
               <span>Low</span>
             </div>
-            <div class="ytitle">Ordinance Workability</div>
           </div>
 
           <div>
@@ -1293,7 +1290,6 @@
       </div>
     `;
   } else if (showMW) {
-    // Energy-only legend
     mapKeyEl.innerHTML = css + `
       <div class="legend">
         <div class="title">Energy Capacity</div>
@@ -1303,7 +1299,6 @@
       </div>
     `;
   } else if (showOrd) {
-    // Ordinance-only legend
     mapKeyEl.innerHTML = css + `
       <div class="legend">
         <div class="title">Ordinance Workability</div>
