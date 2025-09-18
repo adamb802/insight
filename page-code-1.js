@@ -1360,8 +1360,8 @@
 const FED_TOGGLE_SELECTOR = 'input[type="checkbox"][data-role="overlay-toggle"][value="federal-lands"]';
 
 // If you used Mapbox Tilesets (Option A), set these:
-const FED_TILESET_URL   = 'mapbox://YOUR_USERNAME.YOUR_TILESET_ID'; // e.g., mapbox://urlstudio.abc123
-const FED_SOURCE_LAYER  = 'federal_lands'; // exact "source layer" name from the tileset page
+const FED_TILESET_URL   = 'mapbox://urlstudio.461y96x1'; // e.g., mapbox://urlstudio.abc123
+const FED_SOURCE_LAYER  = 'US_Fed_Lands_ESRI-6f7g6h'; // exact "source layer" name from the tileset page
 
 // Internal IDs (unique, do not clash with your existing layers/sources)
 const FED_SRC_ID  = 'federal-lands-src';
