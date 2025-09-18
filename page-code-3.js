@@ -1361,7 +1361,7 @@ const FED_TOGGLE_SELECTOR = 'input[type="checkbox"][data-role="overlay-toggle"][
 
 // If you used Mapbox Tilesets (Option A), set these:
 const FED_TILESET_URL   = 'mapbox://urlstudio.461y96x1'; // e.g., mapbox://urlstudio.abc123
-const FED_SOURCE_LAYER  = 'us-fed-lands-usa-federal-lands'; // exact "source layer" name from the tileset page
+const FED_SOURCE_LAYER  = 'us_fed_lands__usa_federal_lands'; // exact "source layer" name from the tileset page
 
 // Internal IDs (unique, do not clash with your existing layers/sources)
 const FED_SRC_ID  = 'federal-lands-src';
