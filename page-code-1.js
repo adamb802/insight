@@ -4,7 +4,7 @@
   // CONFIG
   // ==============================
   const API_BASE = 'https://pi-api-264542425514.us-central1.run.app';
-  const MAP_STYLE = 'mapbox://styles/urlstudio/cmek4dtim00cx01s4gkovdh1d';
+  const MAP_STYLE = 'mapbox://styles/urlstudio/cmfplm2as00ez01ry7rla1mfl';
   const COUNTY_GEOJSON_URL = 'https://raw.githubusercontent.com/url-studio/map-data/main/county-data.geojson';
 
   // Color ramps (tweak freely)
@@ -1361,7 +1361,7 @@ const FED_TOGGLE_SELECTOR = 'input[type="checkbox"][data-role="overlay-toggle"][
 
 // If you used Mapbox Tilesets (Option A), set these:
 const FED_TILESET_URL   = 'mapbox://urlstudio.461y96x1'; // e.g., mapbox://urlstudio.abc123
-const FED_SOURCE_LAYER  = 'US_Fed_Lands_ESRI-6f7g6h'; // exact "source layer" name from the tileset page
+const FED_SOURCE_LAYER  = 'us-fed-lands-usa-federal-lands'; // exact "source layer" name from the tileset page
 
 // Internal IDs (unique, do not clash with your existing layers/sources)
 const FED_SRC_ID  = 'federal-lands-src';
