@@ -30,6 +30,19 @@
   let map;
   let countiesGeoJSON = null;
 
+  // ==============================
+  // HOVER + FOCUS STATE
+  // ==============================
+  let countyIdProp = 'id';             // which property is the county ID (GEOID/FIPS/etc)
+  let countyFeatureById = new Map();   // fips -> GeoJSON feature
+  let hoveredCountyId = null;          // fips
+  let focusedCountyId = null;          // fips (locked selection)
+  let hoverPopup = null;
+
+  // Base expressions cached from paintCounties()
+  let countyBaseColorExpr = null;
+  let countyBaseOpacityExpr = null;
+
   let allProjects = [];
   let allCounties = [];
   let countyById = new Map(); // key: FIPS
@@ -125,6 +138,13 @@
     paintCountiesByActiveMW();           // (now calls the new painter)
     updateMapKey();                      // legend
 
+    // If URL specified a focused county, reflect it on the map (and zoom once)
+    if (focusedCountyId) {
+      try { map.setFeatureState({ source: 'counties', id: focusedCountyId }, { selected: true }); } catch {}
+      applyBaseCountyDim();
+      zoomToCounty(focusedCountyId);
+    }
+
     // Initial viewport
     recomputeVisibleSets();
     updateVisibleCounters();
@@ -169,7 +189,20 @@
     const resp = await fetch(COUNTY_GEOJSON_URL);
     countiesGeoJSON = await resp.json();
 
-    map.addSource('counties', { type: 'geojson', data: countiesGeoJSON });
+    // Determine the county ID property once and keep a quick lookup map
+    countyIdProp = inferCountyIdProp(countiesGeoJSON) || 'id';
+    countyFeatureById = new Map(
+      (countiesGeoJSON.features || [])
+        .map(f => [extractCountyIdFromFeature(f), f])
+        .filter(([id]) => id)
+    );
+
+    // Promote the ID so we can use feature-state (fast hover/selection styling)
+    map.addSource('counties', {
+      type: 'geojson',
+      data: countiesGeoJSON,
+      promoteId: countyIdProp
+    });
 
     map.addLayer({
       id: 'county-fills',
@@ -178,6 +211,22 @@
       paint: { 'fill-color': '#000000', 'fill-opacity': 0.0 }
     }, firstSymbolLayerId());
 
+    // Overlay: draws ONLY the hovered/selected county at high opacity
+    map.addLayer({
+      id: 'county-focus-fill',
+      type: 'fill',
+      source: 'counties',
+      paint: {
+        'fill-color': '#000000', // we’ll set this to the same colorExpr as base in paintCounties()
+        'fill-opacity': [
+          'case',
+          ['boolean', ['feature-state', 'selected'], false], 0.95,
+          ['boolean', ['feature-state', 'hover'], false], 0.85,
+          0
+        ]
+      }
+    });
+
     map.addLayer({
       id: 'county-borders',
       type: 'line',
@@ -185,11 +234,41 @@
       paint: { 'line-color': '#ffffff', 'line-width': 0.5, 'line-opacity': 0.4 }
     });
 
+  // Outline: crisp border for hover/selected
+    map.addLayer({
+      id: 'county-focus-line',
+      type: 'line',
+      source: 'counties',
+      paint: {
+        'line-color': [
+          'case',
+          ['boolean', ['feature-state', 'selected'], false], '#0b1b3f',
+          ['boolean', ['feature-state', 'hover'], false], '#0b1b3f',
+          'rgba(0,0,0,0)'
+        ],
+        'line-width': [
+          'case',
+          ['boolean', ['feature-state', 'selected'], false], 2.6,
+          ['boolean', ['feature-state', 'hover'], false], 2.0,
+          0
+        ],
+        'line-opacity': 1
+      }
+    });
+
     map.on('moveend', () => {
       recomputeVisibleSets();
       updateVisibleCounters();
       renderCurrentList(true);
     });
+
+    hoverPopup = new mapboxgl.Popup({
+      closeButton: false,
+      closeOnClick: false,
+      maxWidth: '340px'
+    });
+
+    wireMapInteractions();
   }
 
   function firstSymbolLayerId() {
@@ -668,7 +747,7 @@
   function paintCounties() {
     if (!countiesGeoJSON || !map.getLayer('county-fills')) return;
 
-    const keyProp = inferCountyIdProp(countiesGeoJSON) || 'id';
+    const keyProp = countyIdProp || inferCountyIdProp(countiesGeoJSON) || 'id';
     const { mw: showMW, ord: showOrd } = colorToggles();
 
     // Collect active county values
@@ -748,8 +827,20 @@
     colorExpr.push('#000000');  // default color
     opacityExpr.push(0.0);      // default opacity
 
-    map.setPaintProperty('county-fills', 'fill-color', colorExpr);
-    map.setPaintProperty('county-fills', 'fill-opacity', opacityExpr);
+    // Cache base expressions so we can dim/undim without recomputing bins
+    countyBaseColorExpr = colorExpr;
+    countyBaseOpacityExpr = opacityExpr;
+
+    // Base fill colors
+    map.setPaintProperty('county-fills', 'fill-color', countyBaseColorExpr);
+
+    // Hover/selected overlay uses same fill colors as base
+    if (map.getLayer('county-focus-fill')) {
+      map.setPaintProperty('county-focus-fill', 'fill-color', countyBaseColorExpr);
+    }
+
+    // Base opacity may be dimmed when hovering or focused
+    applyBaseCountyDim();
 
     // Update legend
     updateMapKey();
@@ -773,6 +864,218 @@
     if (!cuts.length) return 1;
     for (let i=0;i<cuts.length;i++){ if (v <= cuts[i]) return i+1; }
     return parts;
+  }
+
+    // ==============================
+  // PHASE 2: MAP HOVER + COUNTY FOCUS
+  // ==============================
+
+  function wireMapInteractions() {
+    if (!map || !map.getLayer('county-fills')) return;
+
+    map.on('mouseenter', 'county-fills', () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', 'county-fills', () => {
+      map.getCanvas().style.cursor = '';
+      setHoveredCounty(null);
+      hideHoverPopup();
+    });
+
+    map.on('mousemove', 'county-fills', (e) => {
+      const f = e.features && e.features[0];
+      const id = f ? extractCountyIdFromFeature(f) : null;
+      setHoveredCounty(id, e.lngLat);
+    });
+
+    map.on('click', 'county-fills', (e) => {
+      const f = e.features && e.features[0];
+      const id = f ? extractCountyIdFromFeature(f) : null;
+      if (!id) return;
+      toggleFocusedCounty(id);
+    });
+  }
+
+  function applyBaseCountyDim() {
+    if (!map || !map.getLayer('county-fills') || !countyBaseOpacityExpr) return;
+
+    const dimFactor = (hoveredCountyId || focusedCountyId) ? 0.25 : 1.0;
+    const expr = (dimFactor === 1.0) ? countyBaseOpacityExpr : ['*', countyBaseOpacityExpr, dimFactor];
+    map.setPaintProperty('county-fills', 'fill-opacity', expr);
+  }
+
+  function setHoveredCounty(fips, lngLat = null) {
+    // If focus is active, we still allow hover highlight, but we won’t alter lists
+    if (fips === hoveredCountyId) {
+      // Keep popup position fresh
+      if (fips && lngLat) showHoverPopup(fips, lngLat);
+      return;
+    }
+
+    // Clear old hover state
+    if (hoveredCountyId) {
+      try { map.setFeatureState({ source: 'counties', id: hoveredCountyId }, { hover: false }); } catch {}
+    }
+
+    hoveredCountyId = fips || null;
+
+    // Set new hover state
+    if (hoveredCountyId) {
+      try { map.setFeatureState({ source: 'counties', id: hoveredCountyId }, { hover: true }); } catch {}
+      if (!lngLat) lngLat = getCountyCenterLngLat(hoveredCountyId);
+      if (lngLat) showHoverPopup(hoveredCountyId, lngLat);
+    } else {
+      hideHoverPopup();
+    }
+
+    // Dim base only when transitioning in/out of hover
+    applyBaseCountyDim();
+
+    // Fade lists only if no locked focus
+    if (!focusedCountyId) applyHoverFadeToLists(hoveredCountyId);
+  }
+
+  function toggleFocusedCounty(fips) {
+    if (focusedCountyId === fips) {
+      clearFocusedCounty();
+      return;
+    }
+    setFocusedCounty(fips, { zoom: true, switchToProjects: true });
+  }
+
+  function setFocusedCounty(fips, { zoom = true, switchToProjects = false } = {}) {
+    // Clear old selected state
+    if (focusedCountyId) {
+      try { map.setFeatureState({ source: 'counties', id: focusedCountyId }, { selected: false }); } catch {}
+    }
+
+    focusedCountyId = fips || null;
+
+    if (focusedCountyId) {
+      try { map.setFeatureState({ source: 'counties', id: focusedCountyId }, { selected: true }); } catch {}
+      if (zoom) zoomToCounty(focusedCountyId);
+
+      if (switchToProjects) {
+        const r = document.querySelector('input[name="which-list"][value="projects"]');
+        if (r) r.checked = true;
+      }
+    }
+
+    // Focus affects the dimming
+    applyBaseCountyDim();
+
+    // Focus affects visible sets + lists + visible counters
+    recomputeVisibleSets();
+    updateVisibleCounters();
+    renderCurrentList(true);
+
+    // Also update URL so focus is shareable
+    updateURLFromFilters();
+
+    // When focus changes, clear hover fades if any
+    applyHoverFadeToLists(null);
+  }
+
+  function clearFocusedCounty() {
+    if (focusedCountyId) {
+      try { map.setFeatureState({ source: 'counties', id: focusedCountyId }, { selected: false }); } catch {}
+    }
+    focusedCountyId = null;
+
+    applyBaseCountyDim();
+    recomputeVisibleSets();
+    updateVisibleCounters();
+    renderCurrentList(true);
+    updateURLFromFilters();
+    applyHoverFadeToLists(null);
+  }
+
+  function zoomToCounty(fips) {
+    if (!map || !countiesGeoJSON || !fips) return;
+    const feat = countyFeatureById.get(fips);
+    if (!feat) return;
+
+    const bbox = turf.bbox(feat); // [minX, minY, maxX, maxY]
+    map.fitBounds([[bbox[0], bbox[1]], [bbox[2], bbox[3]]], {
+      padding: 40,
+      duration: 650,
+      maxZoom: 8
+    });
+  }
+
+  function getCountyCenterLngLat(fips) {
+    const feat = countyFeatureById.get(fips);
+    if (!feat) return null;
+    try {
+      const center = turf.center(feat);
+      const c = center?.geometry?.coordinates;
+      if (Array.isArray(c) && c.length === 2) return { lng: c[0], lat: c[1] };
+    } catch {}
+    return null;
+  }
+
+  function hoverPopupHTML(fips) {
+    const c = countyById.get(fips);
+    const totals = countyTotals.get(fips) || { totalMW: 0, totalProjects: 0 };
+    const ord = countyOrdScores.get(fips);
+
+    const name = (c?.title || fips) + (c?.stateTitle ? `, ${c.stateTitle}` : '');
+    const ordAvg = (ord && ord.totalAvg != null) ? round1(ord.totalAvg) : '—';
+
+    return `
+      <div style="font:12px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; min-width:200px;">
+        <div style="font-weight:800; color:#0b1b3f; margin-bottom:2px;">${escapeHtml(name)}</div>
+        <div style="color:#6b7280; margin-bottom:8px;">FIPS: ${escapeHtml(fips)}</div>
+
+        <div><strong>${formatNumber(totals.totalProjects || 0)}</strong> projects</div>
+        <div><strong>${formatNumber(totals.totalMW || 0)}</strong> MW</div>
+        <div>Ordinance avg: <strong>${escapeHtml(ordAvg)}</strong></div>
+
+        <div style="margin-top:8px; color:#6b7280;">
+          ${focusedCountyId === fips ? 'Selected (click again or Esc to clear)' : 'Click to select'}
+        </div>
+      </div>
+    `;
+  }
+
+  function showHoverPopup(fips, lngLat) {
+    if (!hoverPopup || !map || !fips || !lngLat) return;
+    hoverPopup.setLngLat(lngLat).setHTML(hoverPopupHTML(fips)).addTo(map);
+  }
+
+  function hideHoverPopup() {
+    try { hoverPopup && hoverPopup.remove(); } catch {}
+  }
+
+  function applyHoverFadeToLists(fips) {
+    // If focus is active, lists are already constrained; don’t fade.
+    if (focusedCountyId) return;
+
+    // Projects list: fade projects not in hovered county
+    if (listProjectsEl) {
+      Array.from(listProjectsEl.children).forEach(node => {
+        const ids = String(node.dataset.countyIds || '').split(',').map(s => s.trim()).filter(Boolean);
+        const match = !fips || ids.includes(fips);
+        node.style.opacity = match ? '1' : '0.20';
+      });
+    }
+
+    // Counties list: fade other counties
+    if (listCountiesEl) {
+      Array.from(listCountiesEl.children).forEach(node => {
+        const id = node.dataset.fips || '';
+        const match = !fips || id === fips;
+        node.style.opacity = match ? '1' : '0.20';
+      });
+    }
+
+    // States list: fade to hovered county’s state
+    const st = fips ? (countyById.get(fips)?.stateTitle || '') : '';
+    if (listStatesEl) {
+      Array.from(listStatesEl.children).forEach(node => {
+        const s = node.dataset.state || '';
+        const match = !fips || (st && s === st);
+        node.style.opacity = match ? '1' : '0.20';
+      });
+    }
   }
 
   // ==============================
@@ -834,6 +1137,25 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
   // ==============================
   function recomputeVisibleSets() {
     if (!map || !countiesGeoJSON || !map.getSource('counties')) return;
+
+    // If a county is focused, visible sets become that county (not viewport-limited)
+    if (focusedCountyId) {
+      visibleProjectIdxs = new Set();
+      visibleCountyIds = new Set();
+      visibleStates = new Set();
+
+      if (activeCountyIds.has(focusedCountyId)) {
+        visibleCountyIds.add(focusedCountyId);
+
+        // Only active projects in this county
+        const projSet = projectsByCounty.get(focusedCountyId) || new Set();
+        projSet.forEach(idx => { if (activeProjectIdxs.has(idx)) visibleProjectIdxs.add(idx); });
+
+        const st = countyById.get(focusedCountyId)?.stateTitle || '';
+        if (st) visibleStates.add(st);
+      }
+      return;
+    }
 
     const bounds = map.getBounds();
     visibleProjectIdxs = new Set();
@@ -927,6 +1249,7 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       setField(node, 'developer-text', rec.developerText);
       setField(node, 'total-mw', formatNumber(rec.mwSize || 0));
       setField(node, 'operation-date', rec.opDate ? rec.opDate.toISOString().substring(0,10) : '');
+      node.dataset.countyIds = (rec.countyIds || []).join(',');
       return node;
     } else {
       const div = document.createElement('div');
@@ -940,6 +1263,7 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         <div>MW: ${formatNumber(rec.mwSize || 0)}</div>
         <div>Operation: ${rec.opDate ? rec.opDate.toISOString().substring(0,10) : ''}</div>
       `;
+      div.dataset.countyIds = (rec.countyIds || []).join(',');
       return div;
     }
   }
@@ -1018,6 +1342,21 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         tertileCuts.county.storage
       );
 
+            node.dataset.fips = fips;
+      node.style.cursor = 'pointer';
+
+      node.addEventListener('mouseenter', () => {
+        // hover from list -> highlight map + popup at county center
+        setHoveredCounty(fips, getCountyCenterLngLat(fips));
+      });
+      node.addEventListener('mouseleave', () => {
+        setHoveredCounty(null);
+        hideHoverPopup();
+      });
+      node.addEventListener('click', () => {
+        toggleFocusedCounty(fips);
+      });
+
       return node;
     } else {
       const div = document.createElement('div');
@@ -1034,6 +1373,13 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
           ord.totalAvg!=null?round1(ord.totalAvg):'—'
         ].join(' / ')}</div>
       `;
+
+      div.dataset.fips = fips;
+      div.style.cursor = 'pointer';
+      div.addEventListener('mouseenter', () => setHoveredCounty(fips, getCountyCenterLngLat(fips)));
+      div.addEventListener('mouseleave', () => { setHoveredCounty(null); hideHoverPopup(); });
+      div.addEventListener('click', () => toggleFocusedCounty(fips));
+      
       return div;
     }
   }
@@ -1105,7 +1451,8 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         ord.storageAvg,
         tertileCuts.state.storage
       );
-
+      
+      node.dataset.state = stateName;
       return node;
     } else {
       const div = document.createElement('div');
@@ -1123,6 +1470,8 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
           ord.totalAvg!=null?round1(ord.totalAvg):'—'
         ].join(' / ')}</div>
       `;
+      
+      div.dataset.state = stateName;
       return div;
     }
   }
@@ -1188,6 +1537,11 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       const modeSel = document.getElementById('opdate-mode'); if (modeSel) modeSel.value = 'any';
       const search = document.getElementById('project-search'); if (search) search.value = '';
       onAnyFilterChanged();
+    });
+
+    // Esc clears focused county
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && focusedCountyId) clearFocusedCounty();
     });
   }
 
@@ -1256,14 +1610,21 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     const q = (document.getElementById('project-search')?.value || '').trim();
     if (q) params.set('q', encodeURIComponent(q));
 
+    // Focused county
+    if (focusedCountyId) params.set('county', focusedCountyId);
+
     const qs = params.toString();
     const newUrl = `${location.pathname}${qs ? '?' + qs : ''}${location.hash}`;
     history.replaceState(null, '', newUrl);
   }
 
   function applyFiltersFromURL() {
+    
     const urlParams = new URLSearchParams(location.search);
     if (!urlParams || [...urlParams.keys()].length === 0) return;
+
+    const county = urlParams.get('county');
+    if (county) focusedCountyId = county;
 
     const techParam = urlParams.get('tech');
     if (techParam != null) {
@@ -1475,7 +1836,7 @@ const FED_FILL_ID = 'federal-lands-fill';
 // Call once, after the map is created & UI is present.
 function setupFederalLandsOverlay() {
   const cb = document.querySelector(FED_TOGGLE_SELECTOR);
-  if (!cb || !window.map) return;
+  if (!cb || !map) return;
 
   // Ensure layer exists when turned on
   function ensureLayer() {
