@@ -210,21 +210,17 @@
       if (overlay) { overlay.style.display = 'block'; overlay.style.opacity = '1'; }
     };
 
-    // ----- Projects (paged) -----
-    let all = [], offset = null;
-    do {
-      const url = API_BASE + '/developments' + (offset ? ('?offset=' + encodeURIComponent(offset)) : '');
-      const res = await fetch(url);
-      if (!res.ok) throw new Error('/developments failed: ' + res.status);
-      const data  = await res.json();
-      all = all.concat(data.records || []);
-      offset = data.offset || null;
-      showProgress(all.length);
-      await new Promise(r => setTimeout(r, 0));
-    } while (offset);
-
-    allProjects = all.map(normalizeProject).filter(Boolean);
-
+    // ----- Projects (single fetch, cached server-side) -----
+    const resAll = await fetch(API_BASE + '/developmentsAll');
+    if (!resAll.ok) throw new Error('/developmentsAll failed: ' + resAll.status);
+    const dataAll = await resAll.json();
+    
+    // keep your normalizer (safe)
+    allProjects = (dataAll.records || []).map(normalizeProject).filter(Boolean);
+    
+    // show count in the loader UI if present
+    showProgress(allProjects.length);
+    
     // ----- Counties (+ ordinance scores) -----
     const resCounties = await fetch(API_BASE + '/counties');
     if (!resCounties.ok) throw new Error('/counties failed');
@@ -589,10 +585,10 @@
       const totalAvg   = tCnt ? (tSum/tCnt) : null;
 
       stateOrdScores.set(stateName, { windAvg, solarAvg, storageAvg, totalAvg });
-
-      // NEW: Recompute icon tertile thresholds for counties & states
-      computeIconTertiles();
     });
+
+    // NEW: Recompute icon tertile thresholds for counties & states
+      computeIconTertiles();
   }
 
   function isFiniteNum(v){ return typeof v === 'number' && isFinite(v); }
