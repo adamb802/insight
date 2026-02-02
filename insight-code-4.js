@@ -119,6 +119,7 @@
   window.addEventListener('DOMContentLoaded', init);
 
   async function init() {
+    ensurePhase3Styles();
     captureTemplates();
     await initMap();
     await loadData();
@@ -141,7 +142,6 @@
     // If URL specified a focused county, reflect it on the map (and zoom once)
     if (focusedCountyId) {
       try { map.setFeatureState({ source: 'counties', id: focusedCountyId }, { selected: true }); } catch {}
-      applyBaseCountyDim();
       zoomToCounty(focusedCountyId);
     }
 
@@ -212,18 +212,13 @@
     }, firstSymbolLayerId());
 
     // Overlay: draws ONLY the hovered/selected county at high opacity
-    map.addLayer({
+       map.addLayer({
       id: 'county-focus-fill',
       type: 'fill',
       source: 'counties',
       paint: {
-        'fill-color': '#000000', // we’ll set this to the same colorExpr as base in paintCounties()
-        'fill-opacity': [
-          'case',
-          ['boolean', ['feature-state', 'selected'], false], 0.95,
-          ['boolean', ['feature-state', 'hover'], false], 0.85,
-          0
-        ]
+        'fill-color': '#000000',
+        'fill-opacity': 0 // disabled: highlight is outline-only now
       }
     });
 
@@ -839,8 +834,8 @@
       map.setPaintProperty('county-focus-fill', 'fill-color', countyBaseColorExpr);
     }
 
-    // Base opacity may be dimmed when hovering or focused
-    applyBaseCountyDim();
+    // Always use the computed base opacity expression (no dimming)
+    map.setPaintProperty('county-fills', 'fill-opacity', countyBaseOpacityExpr);
 
     // Update legend
     updateMapKey();
@@ -894,13 +889,7 @@
     });
   }
 
-  function applyBaseCountyDim() {
-    if (!map || !map.getLayer('county-fills') || !countyBaseOpacityExpr) return;
 
-    const dimFactor = (hoveredCountyId || focusedCountyId) ? 0.25 : 1.0;
-    const expr = (dimFactor === 1.0) ? countyBaseOpacityExpr : ['*', countyBaseOpacityExpr, dimFactor];
-    map.setPaintProperty('county-fills', 'fill-opacity', expr);
-  }
 
   function setHoveredCounty(fips, lngLat = null) {
     // If focus is active, we still allow hover highlight, but we won’t alter lists
@@ -926,11 +915,8 @@
       hideHoverPopup();
     }
 
-    // Dim base only when transitioning in/out of hover
-    applyBaseCountyDim();
+        applyListHighlights();
 
-    // Fade lists only if no locked focus
-    if (!focusedCountyId) applyHoverFadeToLists(hoveredCountyId);
   }
 
   function toggleFocusedCounty(fips) {
@@ -959,9 +945,6 @@
       }
     }
 
-    // Focus affects the dimming
-    applyBaseCountyDim();
-
     // Focus affects visible sets + lists + visible counters
     recomputeVisibleSets();
     updateVisibleCounters();
@@ -970,8 +953,6 @@
     // Also update URL so focus is shareable
     updateURLFromFilters();
 
-    // When focus changes, clear hover fades if any
-    applyHoverFadeToLists(null);
   }
 
   function clearFocusedCounty() {
@@ -980,12 +961,10 @@
     }
     focusedCountyId = null;
 
-    applyBaseCountyDim();
     recomputeVisibleSets();
     updateVisibleCounters();
     renderCurrentList(true);
     updateURLFromFilters();
-    applyHoverFadeToLists(null);
   }
 
   function zoomToCounty(fips) {
@@ -1017,21 +996,20 @@
     const totals = countyTotals.get(fips) || { totalMW: 0, totalProjects: 0 };
     const ord = countyOrdScores.get(fips);
 
-    const name = (c?.title || fips) + (c?.stateTitle ? `, ${c.stateTitle}` : '');
+    // IMPORTANT: do NOT append stateTitle (prevents "TX, Texas")
+    const name = (c?.title || fips);
+
     const ordAvg = (ord && ord.totalAvg != null) ? round1(ord.totalAvg) : '—';
 
     return `
       <div style="font:12px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; min-width:200px;">
-        <div style="font-weight:800; color:#0b1b3f; margin-bottom:2px;">${escapeHtml(name)}</div>
-        <div style="color:#6b7280; margin-bottom:8px;">FIPS: ${escapeHtml(fips)}</div>
+        <div style="font-weight:800; color:#0b1b3f; margin-bottom:8px;">
+          ${escapeHtml(name)}
+        </div>
 
         <div><strong>${formatNumber(totals.totalProjects || 0)}</strong> projects</div>
         <div><strong>${formatNumber(totals.totalMW || 0)}</strong> MW</div>
         <div>Ordinance avg: <strong>${escapeHtml(ordAvg)}</strong></div>
-
-        <div style="margin-top:8px; color:#6b7280;">
-          ${focusedCountyId === fips ? 'Selected (click again or Esc to clear)' : 'Click to select'}
-        </div>
       </div>
     `;
   }
@@ -1045,38 +1023,6 @@
     try { hoverPopup && hoverPopup.remove(); } catch {}
   }
 
-  function applyHoverFadeToLists(fips) {
-    // If focus is active, lists are already constrained; don’t fade.
-    if (focusedCountyId) return;
-
-    // Projects list: fade projects not in hovered county
-    if (listProjectsEl) {
-      Array.from(listProjectsEl.children).forEach(node => {
-        const ids = String(node.dataset.countyIds || '').split(',').map(s => s.trim()).filter(Boolean);
-        const match = !fips || ids.includes(fips);
-        node.style.opacity = match ? '1' : '0.20';
-      });
-    }
-
-    // Counties list: fade other counties
-    if (listCountiesEl) {
-      Array.from(listCountiesEl.children).forEach(node => {
-        const id = node.dataset.fips || '';
-        const match = !fips || id === fips;
-        node.style.opacity = match ? '1' : '0.20';
-      });
-    }
-
-    // States list: fade to hovered county’s state
-    const st = fips ? (countyById.get(fips)?.stateTitle || '') : '';
-    if (listStatesEl) {
-      Array.from(listStatesEl.children).forEach(node => {
-        const s = node.dataset.state || '';
-        const match = !fips || (st && s === st);
-        node.style.opacity = match ? '1' : '0.20';
-      });
-    }
-  }
 
   // ==============================
 // ICON TERTILES (green / yellow / red)
@@ -1204,6 +1150,7 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       if (resetCursor) listCursorStates = 0;
       renderStatesList();
     }
+     applyListHighlights();
   }
   function toggleListVisibility(mode) {
     if (!listProjectsEl || !listCountiesEl || !listStatesEl) return;
@@ -1229,6 +1176,7 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     next.forEach(idx => listProjectsEl.appendChild(makeProjectCard(allProjects[idx])));
     listCursorProjects += next.length;
     if (listCursorProjects < arr.length) addLoadMore(listProjectsEl, () => renderProjectsListNext(arr));
+    applyListHighlights();
   }
   function projectSort(a, b, sort) {
     if (sort === 'mw-desc') return (b.mwSize||0) - (a.mwSize||0);
@@ -1250,6 +1198,22 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       setField(node, 'total-mw', formatNumber(rec.mwSize || 0));
       setField(node, 'operation-date', rec.opDate ? rec.opDate.toISOString().substring(0,10) : '');
       node.dataset.countyIds = (rec.countyIds || []).join(',');
+            node.dataset.primaryCounty = (rec.countyIds && rec.countyIds[0]) ? rec.countyIds[0] : '';
+      node.style.cursor = 'pointer';
+
+      node.addEventListener('mouseenter', () => {
+        const fips = node.dataset.primaryCounty;
+        if (fips) setHoveredCounty(fips, getCountyCenterLngLat(fips));
+      });
+
+      node.addEventListener('mouseleave', () => {
+        setHoveredCounty(null);
+      });
+
+      node.addEventListener('click', () => {
+        const fips = node.dataset.primaryCounty;
+        if (fips) setFocusedCounty(fips, { zoom: true, switchToProjects: true });
+      });
       return node;
     } else {
       const div = document.createElement('div');
@@ -1264,6 +1228,22 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         <div>Operation: ${rec.opDate ? rec.opDate.toISOString().substring(0,10) : ''}</div>
       `;
       div.dataset.countyIds = (rec.countyIds || []).join(',');
+            node.dataset.primaryCounty = (rec.countyIds && rec.countyIds[0]) ? rec.countyIds[0] : '';
+      node.style.cursor = 'pointer';
+
+      node.addEventListener('mouseenter', () => {
+        const fips = div.dataset.primaryCounty;
+        if (fips) setHoveredCounty(fips, getCountyCenterLngLat(fips));
+      });
+
+      node.addEventListener('mouseleave', () => {
+        setHoveredCounty(null);
+      });
+
+      node.addEventListener('click', () => {
+        const fips = div.dataset.primaryCounty;
+        if (fips) setFocusedCounty(fips, { zoom: true, switchToProjects: true });
+      });
       return div;
     }
   }
@@ -1295,6 +1275,7 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     next.forEach(fips => listCountiesEl.appendChild(makeCountyCard(fips)));
     listCursorCounties += next.length;
     if (listCursorCounties < arr.length) addLoadMore(listCountiesEl, () => renderCountiesListNext(arr));
+    applyListHighlights();
   }
   function makeCountyCard(fips) {
     const cInfo = countyById.get(fips);
@@ -1407,6 +1388,7 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     next.forEach(st => listStatesEl.appendChild(makeStateCard(st)));
     listCursorStates += next.length;
     if (listCursorStates < arr.length) addLoadMore(listStatesEl, () => renderStatesListNext(arr));
+    applyListHighlights();
   }
   function makeStateCard(stateName) {
     const totals = stateTotals.get(stateName) || { totalMW:0, totalProjects:0, totalCounties:0 };
@@ -1806,6 +1788,63 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     btn.dataset.role = 'load-more';
     parent.appendChild(btn);
   }
+
+    // ==============================
+  // PHASE 3: NON-OPACITY HIGHLIGHTS
+  // ==============================
+  function ensurePhase3Styles() {
+    if (document.getElementById('phase3-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'phase3-styles';
+    style.textContent = `
+      .is-hovered  { outline: 2px solid rgba(99,102,241,0.55); outline-offset: 2px; }
+      .is-selected { outline: 3px solid rgba(11,27,63,0.75); outline-offset: 2px; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function applyListHighlights() {
+    const hoverFips = hoveredCountyId;
+    const focusFips = focusedCountyId;
+
+    const hoverState = hoverFips ? (countyById.get(hoverFips)?.stateTitle || '') : '';
+    const focusState = focusFips ? (countyById.get(focusFips)?.stateTitle || '') : '';
+
+    // Projects list
+    if (listProjectsEl) {
+      Array.from(listProjectsEl.children).forEach(node => {
+        const ids = String(node.dataset.countyIds || '')
+          .split(',').map(s => s.trim()).filter(Boolean);
+
+        const isHover = !!hoverFips && ids.includes(hoverFips);
+        const isSel   = !!focusFips && ids.includes(focusFips);
+
+        node.classList.toggle('is-hovered', isHover);
+        node.classList.toggle('is-selected', isSel);
+      });
+    }
+
+    // Counties list
+    if (listCountiesEl) {
+      Array.from(listCountiesEl.children).forEach(node => {
+        const fips = String(node.dataset.fips || '');
+        node.classList.toggle('is-hovered', !!hoverFips && fips === hoverFips);
+        node.classList.toggle('is-selected', !!focusFips && fips === focusFips);
+      });
+    }
+
+    // States list
+    if (listStatesEl) {
+      Array.from(listStatesEl.children).forEach(node => {
+        const st = String(node.dataset.state || '');
+        node.classList.toggle('is-hovered', !!hoverState && st === hoverState);
+        node.classList.toggle('is-selected', !!focusState && st === focusState);
+      });
+    }
+  }
+
+
+  
   function removeLoadMore(parent) {
     const btn = parent?.querySelector('button[data-role="load-more"]');
     if (btn) btn.remove();
