@@ -42,6 +42,7 @@
   // ==============================
   let focusedStateName = null;   // stateTitle (selected)
   let focusedProjectIdx = null;  // index in allProjects (selected)
+  let savedStateCheckboxSnapshot = null; // Set<string> of checked states before state-click filter
   
   let focusedStateCountyIds = new Set();    // fips (for map outline)
   let focusedProjectCountyIds = new Set();  // fips (for map outline)
@@ -914,6 +915,27 @@
 // PRIMARY SELECTION + SEGMENT COLLAPSE + DROPDOWNS
 // ==============================
 
+  function snapshotStateCheckboxes() {
+  if (!stateBoxWrap) return null;
+  return new Set(
+    Array.from(stateBoxWrap.querySelectorAll('input.state-box'))
+      .filter(cb => cb.checked)
+      .map(cb => cb.value)
+  );
+}
+
+function applyOnlyThisStateCheckbox(stateName) {
+  if (!stateBoxWrap) return;
+  Array.from(stateBoxWrap.querySelectorAll('input.state-box'))
+    .forEach(cb => { cb.checked = (cb.value === stateName); });
+}
+
+function restoreStateCheckboxes(snapshot) {
+  if (!stateBoxWrap || !snapshot) return;
+  Array.from(stateBoxWrap.querySelectorAll('input.state-box'))
+    .forEach(cb => { cb.checked = snapshot.has(cb.value); });
+}
+
 function hasSelection() {
   return (focusedProjectIdx != null) || !!focusedCountyId || !!focusedStateName;
 }
@@ -995,10 +1017,8 @@ function safeSetCountySelected(fips, selected) {
 }
 
 function clearSelectionStatesOnly() {
+  // Only a directly-clicked COUNTY should ever be "selected" on the map.
   if (focusedCountyId) safeSetCountySelected(focusedCountyId, false);
-
-  focusedStateCountyIds.forEach(f => safeSetCountySelected(f, false));
-  focusedProjectCountyIds.forEach(f => safeSetCountySelected(f, false));
 
   focusedStateCountyIds.clear();
   focusedProjectCountyIds.clear();
@@ -1009,7 +1029,11 @@ function clearSelectionStatesOnly() {
 }
 
 function clearFocusedSelection({ restoreMode = true, rerender = true } = {}) {
-  const had = hasSelection();
+  const hadSelection = hasSelection();
+
+  // If a state-click forced the state checkbox filter, restore it on undo.
+  const hadStateSnapshot = !!savedStateCheckboxSnapshot;
+
   clearSelectionStatesOnly();
 
   // Reset dropdown tabs
@@ -1025,7 +1049,19 @@ function clearFocusedSelection({ restoreMode = true, rerender = true } = {}) {
 
   updatePrimarySegmentedUI();
 
-  if (rerender && had) {
+  // Restore state checkbox filter if it was forced by a state-record click
+  if (hadStateSnapshot) {
+    restoreStateCheckboxes(savedStateCheckboxSnapshot);
+    savedStateCheckboxSnapshot = null;
+
+    // Recompute everything because filters changed
+    recomputeActiveSets();
+    recomputeOrdinanceCaches();
+    updateGlobalCounters();
+    paintCountiesByActiveMW();
+  }
+
+  if (rerender && hadSelection) {
     recomputeVisibleSets();
     updateVisibleCounters();
     renderCurrentList(true);
@@ -1095,26 +1131,28 @@ function setFocusedState(stateName, { zoom = true } = {}) {
   focusedStateName = stateName;
   stateDropdownTab = 'projects';
 
-  // Outline all active counties in the state
-  const entry = stateIndex.get(stateName);
-  if (entry) {
-    entry.countyIds.forEach(fips => {
-      if (activeCountyIds.has(fips) && countyFeatureById.has(fips)) {
-        focusedStateCountyIds.add(fips);
-        safeSetCountySelected(fips, true);
-      }
-    });
+  // Snapshot the current state checkbox selection once so undo can restore it
+  if (!savedStateCheckboxSnapshot) {
+    savedStateCheckboxSnapshot = snapshotStateCheckboxes();
   }
+
+  // Force the state checkbox filter to ONLY this state (exactly like user filtering)
+  applyOnlyThisStateCheckbox(stateName);
 
   setPrimaryMode('states');
   updatePrimarySegmentedUI();
 
-  if (zoom) zoomToCountySet(Array.from(focusedStateCountyIds), 6);
+  // Run the normal filter pipeline so totals + map update exactly like the filter UI
+  onAnyFilterChanged();
 
-  recomputeVisibleSets();
-  updateVisibleCounters();
-  renderCurrentList(true);
-  updateURLFromFilters();
+  // IMPORTANT: Do NOT outline all counties in a state (no feature-state selected here)
+
+  // Optional zoom
+  if (zoom) {
+    const entry = stateIndex.get(stateName);
+    const fipsForZoom = entry ? Array.from(entry.countyIds).filter(f => countyFeatureById.has(f)) : [];
+    zoomToCountySet(fipsForZoom, 6);
+  }
 }
 
 // ----- Project selection -----
@@ -1145,12 +1183,12 @@ function setFocusedProject(idx, { zoom = true } = {}) {
   projectDropdownTab = 'media';
 
   const p = allProjects[i];
+  focusedProjectCountyIds.clear();
   (p?.countyIds || []).forEach(fips => {
     if (!fips) return;
-    focusedProjectCountyIds.add(fips);
-    safeSetCountySelected(fips, true);
+    if (countyFeatureById.has(fips)) focusedProjectCountyIds.add(fips);
   });
-
+  
   setPrimaryMode('projects');
   updatePrimarySegmentedUI();
 
@@ -1427,31 +1465,9 @@ function renderCountyCardsInContainer(container, fipsArr) {
       applyListHighlights();
     }
 
-  function toggleFocusedCounty(fips) {
-    if (focusedCountyId === fips) {
-      clearFocusedCounty();
-      return;
-    }
-    setFocusedCounty(fips, { zoom: true, switchToProjects: true });
-  }
-
-  function setFocusedCounty(fips, { zoom = true, switchToProjects = false } = {}) {
-    // Clear old selected state
-    if (focusedCountyId) {
-      try { map.setFeatureState({ source: 'counties', id: focusedCountyId }, { selected: false }); } catch {}
-    }
 
     focusedCountyId = fips || null;
 
-    if (focusedCountyId) {
-      try { map.setFeatureState({ source: 'counties', id: focusedCountyId }, { selected: true }); } catch {}
-      if (zoom) zoomToCounty(focusedCountyId);
-
-      if (switchToProjects) {
-        const r = document.querySelector('input[name="which-list"][value="projects"]');
-        if (r) r.checked = true;
-      }
-    }
 
     // Focus affects visible sets + lists + visible counters
     recomputeVisibleSets();
@@ -1707,18 +1723,34 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     let arr = Array.from(visibleProjectIdxs);
     arr.sort((a,b)=>projectSort(allProjects[a], allProjects[b], sort));
     const slice = arr.slice(0, listCursorProjects + LIST_PAGE_SIZE);
-    slice.forEach(idx => listProjectsEl.appendChild(makeProjectCard(allProjects[idx], idx)));
+    slice.forEach(idx => {
+        const card = makeProjectCard(allProjects[idx], idx);
+        listProjectsEl.appendChild(card);
+      
+        if (focusedProjectIdx === idx) {
+          listProjectsEl.appendChild(buildProjectDropdown(idx));
+        }
+      });
     listCursorProjects = slice.length;
     if (slice.length < arr.length) addLoadMore(listProjectsEl, () => renderProjectsListNext(arr));
   }
-  function renderProjectsListNext(arr) {
-    removeLoadMore(listProjectsEl);
-    const next = arr.slice(listCursorProjects, listCursorProjects + LIST_PAGE_SIZE);
-    slice.forEach(idx => listProjectsEl.appendChild(makeProjectCard(allProjects[idx], idx)));
-    listCursorProjects += next.length;
-    if (listCursorProjects < arr.length) addLoadMore(listProjectsEl, () => renderProjectsListNext(arr));
-    applyListHighlights();
-  }
+    function renderProjectsListNext(arr) {
+      removeLoadMore(listProjectsEl);
+    
+      const next = arr.slice(listCursorProjects, listCursorProjects + LIST_PAGE_SIZE);
+      next.forEach(idx => {
+        const card = makeProjectCard(allProjects[idx], idx);
+        listProjectsEl.appendChild(card);
+    
+        if (focusedProjectIdx === idx) {
+          listProjectsEl.appendChild(buildProjectDropdown(idx));
+        }
+      });
+    
+      listCursorProjects += next.length;
+      if (listCursorProjects < arr.length) addLoadMore(listProjectsEl, () => renderProjectsListNext(arr));
+      applyListHighlights();
+    }
   function projectSort(a, b, sort) {
     if (sort === 'mw-desc') return (b.mwSize||0) - (a.mwSize||0);
     if (sort === 'title-az') return a.title.localeCompare(b.title);
@@ -1758,10 +1790,6 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       if (projectIdx != null) toggleFocusedProject(projectIdx);
     });
 
-    if (projectIdx != null && focusedProjectIdx === projectIdx) {
-      node.classList.add('is-selected');
-      node.appendChild(buildProjectDropdown(projectIdx));
-    }
 
     return node;
   } else {
@@ -1794,11 +1822,6 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       if (projectIdx != null) toggleFocusedProject(projectIdx);
     });
 
-    if (projectIdx != null && focusedProjectIdx === projectIdx) {
-      div.classList.add('is-selected');
-      div.appendChild(buildProjectDropdown(projectIdx));
-    }
-
     return div;
   }
 }
@@ -1820,14 +1843,28 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       return B - A;
     });
     const slice = arr.slice(0, listCursorCounties + LIST_PAGE_SIZE);
-    slice.forEach(fips => listCountiesEl.appendChild(makeCountyCard(fips)));
+    slice.forEach(fips => {
+      const card = makeCountyCard(fips);
+      listCountiesEl.appendChild(card);
+    
+      if (focusedCountyId === fips) {
+        listCountiesEl.appendChild(buildCountyDropdown(fips));
+      }
+    });
     listCursorCounties = slice.length;
     if (slice.length < arr.length) addLoadMore(listCountiesEl, () => renderCountiesListNext(arr));
   }
   function renderCountiesListNext(arr) {
     removeLoadMore(listCountiesEl);
     const next = arr.slice(listCursorCounties, listCursorCounties + LIST_PAGE_SIZE);
-    next.forEach(fips => listCountiesEl.appendChild(makeCountyCard(fips)));
+    next.forEach(fips => {
+      const card = makeCountyCard(fips);
+      listCountiesEl.appendChild(card);
+    
+      if (focusedCountyId === fips) {
+        listCountiesEl.appendChild(buildCountyDropdown(fips));
+      }
+    });
     listCursorCounties += next.length;
     if (listCursorCounties < arr.length) addLoadMore(listCountiesEl, () => renderCountiesListNext(arr));
     applyListHighlights();
@@ -1937,14 +1974,29 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       return B - A;
     });
     const slice = arr.slice(0, listCursorStates + LIST_PAGE_SIZE);
-    slice.forEach(st => listStatesEl.appendChild(makeStateCard(st)));
+    slice.forEach(st => {
+      const card = makeStateCard(st);
+      listStatesEl.appendChild(card);
+    
+      // Dropdown should be BELOW the card (sibling), not inside it
+      if (focusedStateName === st) {
+        listStatesEl.appendChild(buildStateDropdown(st));
+      }
+    });
     listCursorStates = slice.length;
     if (slice.length < arr.length) addLoadMore(listStatesEl, () => renderStatesListNext(arr));
   }
   function renderStatesListNext(arr) {
     removeLoadMore(listStatesEl);
     const next = arr.slice(listCursorStates, listCursorStates + LIST_PAGE_SIZE);
-    next.forEach(st => listStatesEl.appendChild(makeStateCard(st)));
+    next.forEach(st => {
+      const card = makeStateCard(st);
+      listStatesEl.appendChild(card);
+    
+      if (focusedStateName === st) {
+        listStatesEl.appendChild(buildStateDropdown(st));
+      }
+    });
     listCursorStates += next.length;
     if (listCursorStates < arr.length) addLoadMore(listStatesEl, () => renderStatesListNext(arr));
     applyListHighlights();
@@ -1976,10 +2028,6 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         toggleFocusedState(stateName);
       });
       
-      if (focusedStateName === stateName) {
-        node.classList.add('is-selected');
-        node.appendChild(buildStateDropdown(stateName));
-      }
 
       // NEW: Color the tech icons by tertile among ACTIVE states with ACTIVE scores
       setIconTertileClass(
@@ -2028,11 +2076,6 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
         toggleFocusedState(stateName);
       });
-      
-      if (focusedStateName === stateName) {
-        div.classList.add('is-selected');
-        div.appendChild(buildStateDropdown(stateName));
-      }
       
       div.dataset.state = stateName;
       return div;
@@ -2387,7 +2430,8 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     style.id = 'phase3-styles';
     style.textContent = `
       .is-hovered  { outline: 2px solid rgba(99,102,241,0.55); outline-offset: 2px; }
-      .is-selected { outline: 3px solid rgba(11,27,63,0.75); outline-offset: 2px; }
+      /* Selected items should NOT have a dark outline */
+      .is-selected { outline: none !important; }
   
       /* Primary segmented: collapse + reset button */
       .seg-reset {
