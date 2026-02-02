@@ -1,4 +1,5 @@
 
+(function () {
   // ==============================
   // CONFIG
   // ==============================
@@ -1465,18 +1466,7 @@ function renderCountyCardsInContainer(container, fipsArr) {
     }
 
 
-    focusedCountyId = fips || null;
 
-
-    // Focus affects visible sets + lists + visible counters
-    recomputeVisibleSets();
-    updateVisibleCounters();
-    renderCurrentList(true);
-
-    // Also update URL so focus is shareable
-    updateURLFromFilters();
-
-  }
 
   function clearFocusedCounty() {
     if (focusedCountyId) {
