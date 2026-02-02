@@ -37,6 +37,25 @@
   let countyFeatureById = new Map();   // fips -> GeoJSON feature
   let hoveredCountyId = null;          // fips
   let focusedCountyId = null;          // fips (locked selection)
+  // ==============================
+  // PRIMARY SELECTION (Phase 3)
+  // ==============================
+  let focusedStateName = null;   // stateTitle (selected)
+  let focusedProjectIdx = null;  // index in allProjects (selected)
+  
+  let focusedStateCountyIds = new Set();    // fips (for map outline)
+  let focusedProjectCountyIds = new Set();  // fips (for map outline)
+  
+  let lastPrimaryModeBeforeFocus = null;    // remembers which first-layer tab user was on
+  
+  // Secondary dropdown tabs
+  let stateDropdownTab = 'projects';
+  let countyDropdownTab = 'projects';
+  let projectDropdownTab = 'media';
+  
+  // Primary segmented UI refs
+  let primarySegEl = null;
+  let primaryResetBtn = null;
   let hoverPopup = null;
 
   // Base expressions cached from paintCounties()
@@ -120,6 +139,7 @@
 
   async function init() {
     ensurePhase3Styles();
+    initPrimarySegmentedUI();
     captureTemplates();
     await initMap();
     await loadData();
@@ -139,16 +159,17 @@
     paintCountiesByActiveMW();           // (now calls the new painter)
     updateMapKey();                      // legend
 
-    // If URL specified a focused county, reflect it on the map (and zoom once)
-    if (focusedCountyId) {
-      try { map.setFeatureState({ source: 'counties', id: focusedCountyId }, { selected: true }); } catch {}
-      zoomToCounty(focusedCountyId);
-    }
 
-    // Initial viewport
-    recomputeVisibleSets();
-    updateVisibleCounters();
-    renderCurrentList(true);
+    // Initial viewport (or apply county selection from URL)
+    if (focusedCountyId) {
+      const f = focusedCountyId;
+      focusedCountyId = null; // let setFocusedCounty re-apply it cleanly
+      setFocusedCounty(f, { zoom: true });
+    } else {
+      recomputeVisibleSets();
+      updateVisibleCounters();
+      renderCurrentList(true);
+    }
 
     wireUI();
 
@@ -889,35 +910,522 @@
     });
   }
 
+  // ==============================
+// PRIMARY SELECTION + SEGMENT COLLAPSE + DROPDOWNS
+// ==============================
 
+function hasSelection() {
+  return (focusedProjectIdx != null) || !!focusedCountyId || !!focusedStateName;
+}
 
-  function setHoveredCounty(fips, lngLat = null) {
-    // If focus is active, we still allow hover highlight, but we won’t alter lists
-    if (fips === hoveredCountyId) {
-      // Keep popup position fresh
-      if (fips && lngLat) showHoverPopup(fips, lngLat);
-      return;
-    }
+function selectionPrimaryMode() {
+  if (focusedProjectIdx != null) return 'projects';
+  if (focusedCountyId) return 'counties';
+  if (focusedStateName) return 'states';
+  return null;
+}
 
-    // Clear old hover state
-    if (hoveredCountyId) {
-      try { map.setFeatureState({ source: 'counties', id: hoveredCountyId }, { hover: false }); } catch {}
-    }
+function currentPrimaryMode() {
+  const r = document.querySelector('input[name="which-list"]:checked');
+  return r ? r.value : 'projects';
+}
 
-    hoveredCountyId = fips || null;
+function setPrimaryMode(mode) {
+  const r = document.querySelector(`input[name="which-list"][value="${mode}"]`);
+  if (r) r.checked = true;
+}
 
-    // Set new hover state
-    if (hoveredCountyId) {
-      try { map.setFeatureState({ source: 'counties', id: hoveredCountyId }, { hover: true }); } catch {}
-      if (!lngLat) lngLat = getCountyCenterLngLat(hoveredCountyId);
-      if (lngLat) showHoverPopup(hoveredCountyId, lngLat);
-    } else {
-      hideHoverPopup();
-    }
+function initPrimarySegmentedUI() {
+  // Find the TOP segmented control (the one with name="which-list")
+  const any = document.querySelector('input[name="which-list"]');
+  if (!any) return;
+  primarySegEl = any.closest('.segmented');
+  if (!primarySegEl) return;
 
-        applyListHighlights();
-
+  if (!primaryResetBtn) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'seg-reset';
+    btn.innerHTML = `<span class="seg-reset-icon" title="Reset selection">↩</span>`;
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      clearFocusedSelection();
+    });
+    primaryResetBtn = btn;
+    primarySegEl.insertBefore(btn, primarySegEl.firstChild);
   }
+
+  updatePrimarySegmentedUI();
+}
+
+function setPrimaryPillHidden(mode, hidden) {
+  if (!primarySegEl) return;
+  const input = primarySegEl.querySelector(`input[name="which-list"][value="${mode}"]`);
+  const label = input ? primarySegEl.querySelector(`label[for="${input.id}"]`) : null;
+  if (input) input.classList.toggle('is-hidden', !!hidden);
+  if (label) label.classList.toggle('is-hidden', !!hidden);
+}
+
+function updatePrimarySegmentedUI() {
+  const mode = selectionPrimaryMode();
+  const inSelection = !!mode;
+
+  if (primaryResetBtn) primaryResetBtn.classList.toggle('is-visible', inSelection);
+
+  // Unhide everything first
+  ['projects','counties','states'].forEach(m => setPrimaryPillHidden(m, false));
+
+  if (inSelection) {
+    // Ensure the primary tab matches the selected record type
+    setPrimaryMode(mode);
+
+    // Hide the other two pills
+    ['projects','counties','states'].forEach(m => setPrimaryPillHidden(m, m !== mode));
+  }
+}
+
+function safeSetCountySelected(fips, selected) {
+  if (!map || !fips) return;
+  try {
+    if (map.getSource('counties')) {
+      map.setFeatureState({ source: 'counties', id: fips }, { selected: !!selected });
+    }
+  } catch {}
+}
+
+function clearSelectionStatesOnly() {
+  if (focusedCountyId) safeSetCountySelected(focusedCountyId, false);
+
+  focusedStateCountyIds.forEach(f => safeSetCountySelected(f, false));
+  focusedProjectCountyIds.forEach(f => safeSetCountySelected(f, false));
+
+  focusedStateCountyIds.clear();
+  focusedProjectCountyIds.clear();
+
+  focusedCountyId = null;
+  focusedStateName = null;
+  focusedProjectIdx = null;
+}
+
+function clearFocusedSelection({ restoreMode = true, rerender = true } = {}) {
+  const had = hasSelection();
+  clearSelectionStatesOnly();
+
+  // Reset dropdown tabs
+  stateDropdownTab = 'projects';
+  countyDropdownTab = 'projects';
+  projectDropdownTab = 'media';
+
+  // Restore original primary mode
+  if (restoreMode && lastPrimaryModeBeforeFocus) {
+    setPrimaryMode(lastPrimaryModeBeforeFocus);
+  }
+  if (restoreMode) lastPrimaryModeBeforeFocus = null;
+
+  updatePrimarySegmentedUI();
+
+  if (rerender && had) {
+    recomputeVisibleSets();
+    updateVisibleCounters();
+    renderCurrentList(true);
+    updateURLFromFilters();
+  }
+}
+
+// ----- County selection -----
+function canSelectCounty(fips) {
+  return !!fips && countyById.has(fips) && activeCountyIds.has(fips);
+}
+
+function toggleFocusedCounty(fips) {
+  if (!canSelectCounty(fips)) return;
+  if (focusedCountyId === fips) {
+    clearFocusedSelection();
+    return;
+  }
+  setFocusedCounty(fips, { zoom: true });
+}
+
+function setFocusedCounty(fips, { zoom = true } = {}) {
+  if (!canSelectCounty(fips)) return;
+
+  if (!hasSelection()) lastPrimaryModeBeforeFocus = currentPrimaryMode();
+
+  clearSelectionStatesOnly();
+
+  focusedCountyId = fips;
+  countyDropdownTab = 'projects';
+
+  safeSetCountySelected(fips, true);
+
+  // Collapse primary bar to "Counties"
+  setPrimaryMode('counties');
+  updatePrimarySegmentedUI();
+
+  if (zoom) zoomToCounty(fips);
+
+  recomputeVisibleSets();
+  updateVisibleCounters();
+  renderCurrentList(true);
+  updateURLFromFilters();
+}
+
+// ----- State selection -----
+function canSelectState(stateName) {
+  return !!stateName && activeStates.has(stateName);
+}
+
+function toggleFocusedState(stateName) {
+  if (!canSelectState(stateName)) return;
+  if (focusedStateName === stateName) {
+    clearFocusedSelection();
+    return;
+  }
+  setFocusedState(stateName, { zoom: true });
+}
+
+function setFocusedState(stateName, { zoom = true } = {}) {
+  if (!canSelectState(stateName)) return;
+
+  if (!hasSelection()) lastPrimaryModeBeforeFocus = currentPrimaryMode();
+
+  clearSelectionStatesOnly();
+
+  focusedStateName = stateName;
+  stateDropdownTab = 'projects';
+
+  // Outline all active counties in the state
+  const entry = stateIndex.get(stateName);
+  if (entry) {
+    entry.countyIds.forEach(fips => {
+      if (activeCountyIds.has(fips) && countyFeatureById.has(fips)) {
+        focusedStateCountyIds.add(fips);
+        safeSetCountySelected(fips, true);
+      }
+    });
+  }
+
+  setPrimaryMode('states');
+  updatePrimarySegmentedUI();
+
+  if (zoom) zoomToCountySet(Array.from(focusedStateCountyIds), 6);
+
+  recomputeVisibleSets();
+  updateVisibleCounters();
+  renderCurrentList(true);
+  updateURLFromFilters();
+}
+
+// ----- Project selection -----
+function canSelectProject(idx) {
+  const i = Number(idx);
+  return Number.isFinite(i) && activeProjectIdxs.has(i);
+}
+
+function toggleFocusedProject(idx) {
+  if (!canSelectProject(idx)) return;
+  const i = Number(idx);
+  if (focusedProjectIdx === i) {
+    clearFocusedSelection();
+    return;
+  }
+  setFocusedProject(i, { zoom: true });
+}
+
+function setFocusedProject(idx, { zoom = true } = {}) {
+  if (!canSelectProject(idx)) return;
+  const i = Number(idx);
+
+  if (!hasSelection()) lastPrimaryModeBeforeFocus = currentPrimaryMode();
+
+  clearSelectionStatesOnly();
+
+  focusedProjectIdx = i;
+  projectDropdownTab = 'media';
+
+  const p = allProjects[i];
+  (p?.countyIds || []).forEach(fips => {
+    if (!fips) return;
+    focusedProjectCountyIds.add(fips);
+    safeSetCountySelected(fips, true);
+  });
+
+  setPrimaryMode('projects');
+  updatePrimarySegmentedUI();
+
+  if (zoom) zoomToCountySet(Array.from(focusedProjectCountyIds), 8);
+
+  recomputeVisibleSets();
+  updateVisibleCounters();
+  renderCurrentList(true);
+  updateURLFromFilters();
+}
+
+// Zoom to a set of counties
+function zoomToCountySet(fipsArr, maxZoom = 8) {
+  if (!map || !Array.isArray(fipsArr) || fipsArr.length === 0) return;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let any = false;
+
+  fipsArr.forEach(fips => {
+    const feat = countyFeatureById.get(fips);
+    if (!feat) return;
+    try {
+      const b = turf.bbox(feat);
+      minX = Math.min(minX, b[0]);
+      minY = Math.min(minY, b[1]);
+      maxX = Math.max(maxX, b[2]);
+      maxY = Math.max(maxY, b[3]);
+      any = true;
+    } catch {}
+  });
+
+  if (!any) return;
+
+  map.fitBounds([[minX, minY], [maxX, maxY]], {
+    padding: 40,
+    duration: 650,
+    maxZoom
+  });
+}
+
+// ----- Dropdown builders -----
+function buildDropdownTabs({ groupName, options, selectedValue, onChange }) {
+  const seg = document.createElement('div');
+  seg.className = 'segmented';
+
+  options.forEach(opt => {
+    const id = `${groupName}_${opt.value}`;
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = groupName;
+    input.id = id;
+    input.value = opt.value;
+    input.checked = opt.value === selectedValue;
+
+    input.addEventListener('change', () => {
+      if (input.checked) onChange(opt.value);
+    });
+
+    const label = document.createElement('label');
+    label.className = 'seg-pill';
+    label.setAttribute('for', id);
+    label.textContent = opt.label;
+
+    seg.appendChild(input);
+    seg.appendChild(label);
+  });
+
+  return seg;
+}
+
+function buildStateDropdown(stateName) {
+  const wrap = document.createElement('div');
+  wrap.className = 'dropdown-list';
+  wrap.addEventListener('click', (e) => e.stopPropagation());
+
+  const tabsWrap = document.createElement('div');
+  tabsWrap.className = 'dropdown-tab-container';
+
+  const group = `dd_state_${slug(stateName)}`;
+  const seg = buildDropdownTabs({
+    groupName: group,
+    selectedValue: stateDropdownTab,
+    options: [
+      { value: 'projects', label: 'Projects' },
+      { value: 'counties', label: 'Counties' },
+      { value: 'media', label: 'Media' },
+      { value: 'ordinances', label: 'Ordinances' }
+    ],
+    onChange: (val) => { stateDropdownTab = val; renderCurrentList(true); }
+  });
+
+  tabsWrap.appendChild(seg);
+  wrap.appendChild(tabsWrap);
+
+  if (stateDropdownTab === 'projects') {
+    const list = document.createElement('div');
+    list.className = 'project-list';
+    wrap.appendChild(list);
+    renderProjectCardsInContainer(list, Array.from(visibleProjectIdxs));
+  } else if (stateDropdownTab === 'counties') {
+    const list = document.createElement('div');
+    list.className = 'counties-list';
+    wrap.appendChild(list);
+    renderCountyCardsInContainer(list, Array.from(visibleCountyIds));
+  } else {
+    const msg = document.createElement('div');
+    msg.className = 'dropdown-empty';
+    msg.textContent = 'Coming soon.';
+    wrap.appendChild(msg);
+  }
+
+  return wrap;
+}
+
+function buildCountyDropdown(fips) {
+  const wrap = document.createElement('div');
+  wrap.className = 'dropdown-list';
+  wrap.addEventListener('click', (e) => e.stopPropagation());
+
+  const tabsWrap = document.createElement('div');
+  tabsWrap.className = 'dropdown-tab-container';
+
+  const group = `dd_county_${slug(fips)}`;
+  const seg = buildDropdownTabs({
+    groupName: group,
+    selectedValue: countyDropdownTab,
+    options: [
+      { value: 'projects', label: 'Projects' },
+      { value: 'media', label: 'Media' },
+      { value: 'ordinances', label: 'Ordinances' }
+    ],
+    onChange: (val) => { countyDropdownTab = val; renderCurrentList(true); }
+  });
+
+  tabsWrap.appendChild(seg);
+  wrap.appendChild(tabsWrap);
+
+  if (countyDropdownTab === 'projects') {
+    const list = document.createElement('div');
+    list.className = 'project-list';
+    wrap.appendChild(list);
+    renderProjectCardsInContainer(list, Array.from(visibleProjectIdxs));
+  } else {
+    const msg = document.createElement('div');
+    msg.className = 'dropdown-empty';
+    msg.textContent = 'Coming soon.';
+    wrap.appendChild(msg);
+  }
+
+  return wrap;
+}
+
+function buildProjectDropdown(idx) {
+  const wrap = document.createElement('div');
+  wrap.className = 'dropdown-list';
+  wrap.addEventListener('click', (e) => e.stopPropagation());
+
+  const tabsWrap = document.createElement('div');
+  tabsWrap.className = 'dropdown-tab-container';
+
+  const group = `dd_project_${idx}`;
+  const seg = buildDropdownTabs({
+    groupName: group,
+    selectedValue: projectDropdownTab,
+    options: [
+      { value: 'media', label: 'Media' },
+      { value: 'ordinances', label: 'Ordinances' }
+    ],
+    onChange: (val) => { projectDropdownTab = val; renderCurrentList(true); }
+  });
+
+  tabsWrap.appendChild(seg);
+  wrap.appendChild(tabsWrap);
+
+  const msg = document.createElement('div');
+  msg.className = 'dropdown-empty';
+  msg.textContent = 'Coming soon.';
+  wrap.appendChild(msg);
+
+  return wrap;
+}
+
+function renderProjectCardsInContainer(container, idxArr) {
+  if (!container) return;
+  clear(container);
+
+  const sort = document.getElementById('sort-by')?.value || 'mw-desc';
+  const arr = (idxArr || []).filter(i => activeProjectIdxs.has(i));
+  arr.sort((a, b) => projectSort(allProjects[a], allProjects[b], sort));
+
+  if (arr.length === 0) {
+    const msg = document.createElement('div');
+    msg.className = 'dropdown-empty';
+    msg.textContent = 'No projects found.';
+    container.appendChild(msg);
+    return;
+  }
+
+  let cursor = 0;
+  const renderMore = () => {
+    removeLoadMore(container);
+    const next = arr.slice(cursor, cursor + LIST_PAGE_SIZE);
+    next.forEach(i => container.appendChild(makeProjectCard(allProjects[i], i)));
+    cursor += next.length;
+    if (cursor < arr.length) addLoadMore(container, renderMore);
+  };
+  renderMore();
+}
+
+function renderCountyCardsInContainer(container, fipsArr) {
+  if (!container) return;
+  clear(container);
+
+  const sort = document.getElementById('sort-by')?.value || 'mw-desc';
+  const arr = (fipsArr || []).filter(f => activeCountyIds.has(f) && countyTotals.has(f));
+
+  arr.sort((a, b) => {
+    if (sort === 'title-az') {
+      const ta = countyById.get(a)?.title || a;
+      const tb = countyById.get(b)?.title || b;
+      return String(ta).localeCompare(String(tb));
+    }
+    const A = countyTotals.get(a)?.totalMW || 0;
+    const B = countyTotals.get(b)?.totalMW || 0;
+    return B - A;
+  });
+
+  if (arr.length === 0) {
+    const msg = document.createElement('div');
+    msg.className = 'dropdown-empty';
+    msg.textContent = 'No counties found.';
+    container.appendChild(msg);
+    return;
+  }
+
+  let cursor = 0;
+  const renderMore = () => {
+    removeLoadMore(container);
+    const next = arr.slice(cursor, cursor + LIST_PAGE_SIZE);
+    next.forEach(f => container.appendChild(makeCountyCard(f)));
+    cursor += next.length;
+    if (cursor < arr.length) addLoadMore(container, renderMore);
+  };
+  renderMore();
+}
+
+
+
+    function setHoveredCounty(fips, lngLat = null) {
+      // Only allow hover/popup on counties that have a county record AND active projects
+      if (fips && !countyHasHoverInfo(fips)) fips = null;
+    
+      if (fips === hoveredCountyId) {
+        if (fips && lngLat) showHoverPopup(fips, lngLat);
+        return;
+      }
+    
+      // Clear old hover state
+      if (hoveredCountyId) {
+        try { map.setFeatureState({ source: 'counties', id: hoveredCountyId }, { hover: false }); } catch {}
+      }
+    
+      hoveredCountyId = fips || null;
+    
+      // Set new hover state
+      if (hoveredCountyId) {
+        try { map.setFeatureState({ source: 'counties', id: hoveredCountyId }, { hover: true }); } catch {}
+        if (!lngLat) lngLat = getCountyCenterLngLat(hoveredCountyId);
+        if (lngLat) showHoverPopup(hoveredCountyId, lngLat);
+      } else {
+        hideHoverPopup();
+      }
+    
+      applyListHighlights();
+    }
 
   function toggleFocusedCounty(fips) {
     if (focusedCountyId === fips) {
@@ -1013,11 +1521,11 @@
       </div>
     `;
   }
-
-  function showHoverPopup(fips, lngLat) {
-    if (!hoverPopup || !map || !fips || !lngLat) return;
-    hoverPopup.setLngLat(lngLat).setHTML(hoverPopupHTML(fips)).addTo(map);
-  }
+    function showHoverPopup(fips, lngLat) {
+      if (!hoverPopup || !map || !fips || !lngLat) return;
+      if (!countyHasHoverInfo(fips)) return; // critical: suppress popup for empty counties
+      hoverPopup.setLngLat(lngLat).setHTML(hoverPopupHTML(fips)).addTo(map);
+    }
 
   function hideHoverPopup() {
     try { hoverPopup && hoverPopup.remove(); } catch {}
@@ -1082,52 +1590,85 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
   // VISIBLE (Viewport-limited)
   // ==============================
   function recomputeVisibleSets() {
-    if (!map || !countiesGeoJSON || !map.getSource('counties')) return;
+  if (!map || !countiesGeoJSON || !map.getSource('counties')) return;
 
-    // If a county is focused, visible sets become that county (not viewport-limited)
-    if (focusedCountyId) {
-      visibleProjectIdxs = new Set();
-      visibleCountyIds = new Set();
-      visibleStates = new Set();
-
-      if (activeCountyIds.has(focusedCountyId)) {
-        visibleCountyIds.add(focusedCountyId);
-
-        // Only active projects in this county
-        const projSet = projectsByCounty.get(focusedCountyId) || new Set();
-        projSet.forEach(idx => { if (activeProjectIdxs.has(idx)) visibleProjectIdxs.add(idx); });
-
-        const st = countyById.get(focusedCountyId)?.stateTitle || '';
-        if (st) visibleStates.add(st);
-      }
-      return;
-    }
-
-    const bounds = map.getBounds();
+  // If a PROJECT is focused: visible = that project (and its counties/state)
+  if (focusedProjectIdx != null) {
     visibleProjectIdxs = new Set();
     visibleCountyIds = new Set();
     visibleStates = new Set();
 
-    const bboxPoly = turf.bboxPolygon([bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]);
-
-    (countiesGeoJSON.features || []).forEach(f => {
-      const id = extractCountyIdFromFeature(f);
-      if (!id || !activeCountyIds.has(id)) return;
-      if (turf.booleanIntersects(f, bboxPoly)) visibleCountyIds.add(id);
-    });
-
-    activeProjectIdxs.forEach(idx => {
-      const p = allProjects[idx];
-      if (p.countyIds.some(fips => visibleCountyIds.has(fips))) visibleProjectIdxs.add(idx);
-    });
-
-    stateIndex.forEach((entry, stateName) => {
-      let hasVisible = false;
-      entry.countyIds.forEach(fips => { if (visibleCountyIds.has(fips)) hasVisible = true; });
-      if (!hasVisible) entry.projectIdxs.forEach(idx => { if (visibleProjectIdxs.has(idx)) hasVisible = true; });
-      if (hasVisible && (stateName && stateName.trim() !== '')) visibleStates.add(stateName);
-    });
+    if (activeProjectIdxs.has(focusedProjectIdx)) {
+      visibleProjectIdxs.add(focusedProjectIdx);
+      const p = allProjects[focusedProjectIdx];
+      (p.countyIds || []).forEach(f => { if (activeCountyIds.has(f)) visibleCountyIds.add(f); });
+      if (p.stateTitle) visibleStates.add(p.stateTitle);
+    }
+    return;
   }
+
+  // If a COUNTY is focused: visible = that county
+  if (focusedCountyId) {
+    visibleProjectIdxs = new Set();
+    visibleCountyIds = new Set();
+    visibleStates = new Set();
+
+    if (activeCountyIds.has(focusedCountyId)) {
+      visibleCountyIds.add(focusedCountyId);
+
+      const projSet = projectsByCounty.get(focusedCountyId) || new Set();
+      projSet.forEach(idx => { if (activeProjectIdxs.has(idx)) visibleProjectIdxs.add(idx); });
+
+      const st = countyById.get(focusedCountyId)?.stateTitle || '';
+      if (st) visibleStates.add(st);
+    }
+    return;
+  }
+
+  // If a STATE is focused: visible = that state (and its active counties/projects)
+  if (focusedStateName) {
+    visibleProjectIdxs = new Set();
+    visibleCountyIds = new Set();
+    visibleStates = new Set();
+
+    if (activeStates.has(focusedStateName)) {
+      visibleStates.add(focusedStateName);
+
+      const entry = stateIndex.get(focusedStateName);
+      if (entry) {
+        entry.countyIds.forEach(f => { if (activeCountyIds.has(f)) visibleCountyIds.add(f); });
+        entry.projectIdxs.forEach(idx => { if (activeProjectIdxs.has(idx)) visibleProjectIdxs.add(idx); });
+      }
+    }
+    return;
+  }
+
+  // Normal mode: viewport-limited
+  const bounds = map.getBounds();
+  visibleProjectIdxs = new Set();
+  visibleCountyIds = new Set();
+  visibleStates = new Set();
+
+  const bboxPoly = turf.bboxPolygon([bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]);
+
+  (countiesGeoJSON.features || []).forEach(f => {
+    const id = extractCountyIdFromFeature(f);
+    if (!id || !activeCountyIds.has(id)) return;
+    if (turf.booleanIntersects(f, bboxPoly)) visibleCountyIds.add(id);
+  });
+
+  activeProjectIdxs.forEach(idx => {
+    const p = allProjects[idx];
+    if (p.countyIds.some(fips => visibleCountyIds.has(fips))) visibleProjectIdxs.add(idx);
+  });
+
+  stateIndex.forEach((entry, stateName) => {
+    let hasVisible = false;
+    entry.countyIds.forEach(fips => { if (visibleCountyIds.has(fips)) hasVisible = true; });
+    if (!hasVisible) entry.projectIdxs.forEach(idx => { if (visibleProjectIdxs.has(idx)) hasVisible = true; });
+    if (hasVisible && (stateName && stateName.trim() !== '')) visibleStates.add(stateName);
+  });
+}
 
   // ==============================
   // LIST RENDERING (paged)
@@ -1166,14 +1707,14 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     let arr = Array.from(visibleProjectIdxs);
     arr.sort((a,b)=>projectSort(allProjects[a], allProjects[b], sort));
     const slice = arr.slice(0, listCursorProjects + LIST_PAGE_SIZE);
-    slice.forEach(idx => listProjectsEl.appendChild(makeProjectCard(allProjects[idx])));
+    slice.forEach(idx => listProjectsEl.appendChild(makeProjectCard(allProjects[idx], idx)));
     listCursorProjects = slice.length;
     if (slice.length < arr.length) addLoadMore(listProjectsEl, () => renderProjectsListNext(arr));
   }
   function renderProjectsListNext(arr) {
     removeLoadMore(listProjectsEl);
     const next = arr.slice(listCursorProjects, listCursorProjects + LIST_PAGE_SIZE);
-    next.forEach(idx => listProjectsEl.appendChild(makeProjectCard(allProjects[idx])));
+    slice.forEach(idx => listProjectsEl.appendChild(makeProjectCard(allProjects[idx], idx)));
     listCursorProjects += next.length;
     if (listCursorProjects < arr.length) addLoadMore(listProjectsEl, () => renderProjectsListNext(arr));
     applyListHighlights();
@@ -1185,68 +1726,82 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     if (sort === 'opdate-desc') return (b.opDate?.getTime() || 0) - (a.opDate?.getTime() || 0);
     return 0;
   }
-  function makeProjectCard(rec) {
-    if (savedProjectTemplate) {
-      const node = savedProjectTemplate.cloneNode(true);
-      setField(node, 'title', rec.title);
-      setField(node, 'technology-1', rec.tech1);
-      setField(node, 'technology-2', rec.tech2);
-      setField(node, 'technology-3', rec.tech3);
-      setField(node, 'stage', rec.stage);
-      setField(node, 'location-text', rec.locationText);
-      setField(node, 'developer-text', rec.developerText);
-      setField(node, 'total-mw', formatNumber(rec.mwSize || 0));
-      setField(node, 'operation-date', rec.opDate ? rec.opDate.toISOString().substring(0,10) : '');
-      node.dataset.countyIds = (rec.countyIds || []).join(',');
-            node.dataset.primaryCounty = (rec.countyIds && rec.countyIds[0]) ? rec.countyIds[0] : '';
-      node.style.cursor = 'pointer';
+  function makeProjectCard(rec, idx) {
+  const projectIdx = Number.isFinite(Number(idx)) ? Number(idx) : null;
 
-      node.addEventListener('mouseenter', () => {
-        const fips = node.dataset.primaryCounty;
-        if (fips) setHoveredCounty(fips, getCountyCenterLngLat(fips));
-      });
+  if (savedProjectTemplate) {
+    const node = savedProjectTemplate.cloneNode(true);
+    setField(node, 'title', rec.title);
+    setField(node, 'technology-1', rec.tech1);
+    setField(node, 'technology-2', rec.tech2);
+    setField(node, 'technology-3', rec.tech3);
+    setField(node, 'stage', rec.stage);
+    setField(node, 'location-text', rec.locationText);
+    setField(node, 'developer-text', rec.developerText);
+    setField(node, 'total-mw', formatNumber(rec.mwSize || 0));
+    setField(node, 'operation-date', rec.opDate ? rec.opDate.toISOString().substring(0,10) : '');
 
-      node.addEventListener('mouseleave', () => {
-        setHoveredCounty(null);
-      });
+    node.dataset.countyIds = (rec.countyIds || []).join(',');
+    node.dataset.primaryCounty = (rec.countyIds && rec.countyIds[0]) ? rec.countyIds[0] : '';
+    if (projectIdx != null) node.dataset.projectIdx = String(projectIdx);
 
-      node.addEventListener('click', () => {
-        const fips = node.dataset.primaryCounty;
-        if (fips) setFocusedCounty(fips, { zoom: true, switchToProjects: true });
-      });
-      return node;
-    } else {
-      const div = document.createElement('div');
-      div.className = 'project-card';
-      div.style.cssText = 'border:1px solid #eee; padding:10px;';
-      div.innerHTML = `
-        <div><strong>${escapeHtml(rec.title)}</strong></div>
-        <div>${escapeHtml(rec.locationText)}</div>
-        <div>${escapeHtml([rec.tech1, rec.tech2, rec.tech3].filter(Boolean).join(' • '))}</div>
-        <div>Stage: ${escapeHtml(rec.stage)}</div>
-        <div>MW: ${formatNumber(rec.mwSize || 0)}</div>
-        <div>Operation: ${rec.opDate ? rec.opDate.toISOString().substring(0,10) : ''}</div>
-      `;
-      div.dataset.countyIds = (rec.countyIds || []).join(',');
-            node.dataset.primaryCounty = (rec.countyIds && rec.countyIds[0]) ? rec.countyIds[0] : '';
-      node.style.cursor = 'pointer';
+    node.style.cursor = 'pointer';
 
-      node.addEventListener('mouseenter', () => {
-        const fips = div.dataset.primaryCounty;
-        if (fips) setHoveredCounty(fips, getCountyCenterLngLat(fips));
-      });
+    node.addEventListener('mouseenter', () => {
+      const fips = node.dataset.primaryCounty;
+      if (fips) setHoveredCounty(fips, getCountyCenterLngLat(fips));
+    });
+    node.addEventListener('mouseleave', () => setHoveredCounty(null));
 
-      node.addEventListener('mouseleave', () => {
-        setHoveredCounty(null);
-      });
+    node.addEventListener('click', (e) => {
+      if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
+      if (projectIdx != null) toggleFocusedProject(projectIdx);
+    });
 
-      node.addEventListener('click', () => {
-        const fips = div.dataset.primaryCounty;
-        if (fips) setFocusedCounty(fips, { zoom: true, switchToProjects: true });
-      });
-      return div;
+    if (projectIdx != null && focusedProjectIdx === projectIdx) {
+      node.classList.add('is-selected');
+      node.appendChild(buildProjectDropdown(projectIdx));
     }
+
+    return node;
+  } else {
+    const div = document.createElement('div');
+    div.className = 'project-card';
+    div.style.cssText = 'border:1px solid #eee; padding:10px;';
+    div.innerHTML = `
+      <div><strong>${escapeHtml(rec.title)}</strong></div>
+      <div>${escapeHtml(rec.locationText)}</div>
+      <div>${escapeHtml([rec.tech1, rec.tech2, rec.tech3].filter(Boolean).join(' • '))}</div>
+      <div>Stage: ${escapeHtml(rec.stage)}</div>
+      <div>MW: ${formatNumber(rec.mwSize || 0)}</div>
+      <div>Operation: ${rec.opDate ? rec.opDate.toISOString().substring(0,10) : ''}</div>
+    `;
+
+    div.dataset.countyIds = (rec.countyIds || []).join(',');
+    div.dataset.primaryCounty = (rec.countyIds && rec.countyIds[0]) ? rec.countyIds[0] : '';
+    if (projectIdx != null) div.dataset.projectIdx = String(projectIdx);
+
+    div.style.cursor = 'pointer';
+
+    div.addEventListener('mouseenter', () => {
+      const fips = div.dataset.primaryCounty;
+      if (fips) setHoveredCounty(fips, getCountyCenterLngLat(fips));
+    });
+    div.addEventListener('mouseleave', () => setHoveredCounty(null));
+
+    div.addEventListener('click', (e) => {
+      if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
+      if (projectIdx != null) toggleFocusedProject(projectIdx);
+    });
+
+    if (projectIdx != null && focusedProjectIdx === projectIdx) {
+      div.classList.add('is-selected');
+      div.appendChild(buildProjectDropdown(projectIdx));
+    }
+
+    return div;
   }
+}
 
   // ----- Counties -----
   function renderCountiesList() {
@@ -1334,7 +1889,8 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         setHoveredCounty(null);
         hideHoverPopup();
       });
-      node.addEventListener('click', () => {
+      node.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
         toggleFocusedCounty(fips);
       });
 
@@ -1359,7 +1915,10 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       div.style.cursor = 'pointer';
       div.addEventListener('mouseenter', () => setHoveredCounty(fips, getCountyCenterLngLat(fips)));
       div.addEventListener('mouseleave', () => { setHoveredCounty(null); hideHoverPopup(); });
-      div.addEventListener('click', () => toggleFocusedCounty(fips));
+      div.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
+        toggleFocusedCounty(fips);
+      });
       
       return div;
     }
@@ -1411,6 +1970,17 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       setWrapper(node, 'storage-ordinance-score', ord.storageAvg != null);
       setWrapper(node, 'total-ordinance-score',   ord.totalAvg   != null);
 
+      node.style.cursor = 'pointer';
+      node.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
+        toggleFocusedState(stateName);
+      });
+      
+      if (focusedStateName === stateName) {
+        node.classList.add('is-selected');
+        node.appendChild(buildStateDropdown(stateName));
+      }
+
       // NEW: Color the tech icons by tertile among ACTIVE states with ACTIVE scores
       setIconTertileClass(
         node,
@@ -1452,6 +2022,17 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
           ord.totalAvg!=null?round1(ord.totalAvg):'—'
         ].join(' / ')}</div>
       `;
+
+      div.style.cursor = 'pointer';
+      div.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
+        toggleFocusedState(stateName);
+      });
+      
+      if (focusedStateName === stateName) {
+        div.classList.add('is-selected');
+        div.appendChild(buildStateDropdown(stateName));
+      }
       
       div.dataset.state = stateName;
       return div;
@@ -1523,7 +2104,7 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
 
     // Esc clears focused county
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && focusedCountyId) clearFocusedCounty();
+      if (e.key === 'Escape' && hasSelection()) clearFocusedSelection();
     });
   }
 
@@ -1537,6 +2118,14 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     recomputeOrdinanceCaches();       // NEW
     updateGlobalCounters();
     paintCountiesByActiveMW();        // now paints univariate/bivariate
+    // If selection becomes invalid under new filters, clear it (no double-render)
+    if (focusedCountyId && !activeCountyIds.has(focusedCountyId)) {
+      clearFocusedSelection({ rerender: false });
+    } else if (focusedStateName && !activeStates.has(focusedStateName)) {
+      clearFocusedSelection({ rerender: false });
+    } else if (focusedProjectIdx != null && !activeProjectIdxs.has(focusedProjectIdx)) {
+      clearFocusedSelection({ rerender: false });
+    }
     recomputeVisibleSets();
     updateVisibleCounters();
     renderCurrentList(true);
@@ -1790,8 +2379,8 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
   }
 
     // ==============================
-  // PHASE 3: NON-OPACITY HIGHLIGHTS
-  // ==============================
+    // PHASE 3: NON-OPACITY HIGHLIGHTS
+    // ==============================
   function ensurePhase3Styles() {
     if (document.getElementById('phase3-styles')) return;
     const style = document.createElement('style');
@@ -1799,6 +2388,79 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     style.textContent = `
       .is-hovered  { outline: 2px solid rgba(99,102,241,0.55); outline-offset: 2px; }
       .is-selected { outline: 3px solid rgba(11,27,63,0.75); outline-offset: 2px; }
+  
+      /* Primary segmented: collapse + reset button */
+      .seg-reset {
+        width: 0;
+        opacity: 0;
+        padding: 0;
+        margin: 0;
+        border: 0;
+        background: transparent;
+        overflow: hidden;
+        cursor: pointer;
+        transition: width 180ms ease, opacity 180ms ease, margin 180ms ease;
+      }
+      .seg-reset.is-visible {
+        width: 34px;
+        opacity: 1;
+        margin-right: 8px;
+      }
+      .seg-reset-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: 999px;
+        background: rgba(11,27,63,0.08);
+        color: #0b1b3f;
+        font-weight: 800;
+        user-select: none;
+      }
+  
+      .segmented label.seg-pill,
+      .segmented input[type="radio"] {
+        transition: width 180ms ease, opacity 180ms ease, padding 180ms ease, margin 180ms ease;
+      }
+      .segmented label.seg-pill.is-hidden {
+        width: 0 !important;
+        opacity: 0 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        border: 0 !important;
+        pointer-events: none !important;
+        overflow: hidden !important;
+        white-space: nowrap !important;
+      }
+      .segmented input[type="radio"].is-hidden {
+        position: absolute !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+        width: 0 !important;
+        height: 0 !important;
+      }
+  
+      /* Dropdown (secondary layer) */
+      .dropdown-list {
+        margin-top: 10px;
+        padding: 10px;
+        border: 1px solid rgba(0,0,0,0.08);
+        border-radius: 12px;
+        background: rgba(255,255,255,0.92);
+      }
+      .dropdown-tab-container { margin-bottom: 10px; }
+      .dropdown-list .project-list,
+      .dropdown-list .counties-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .dropdown-empty {
+        color: #6b7280;
+        font-size: 12px;
+        padding: 6px 2px;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -1842,6 +2504,11 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       });
     }
   }
+
+  function countyHasHoverInfo(fips) {
+  // Must have a county record AND currently have active projects
+  return !!fips && countyById.has(fips) && activeCountyIds.has(fips);
+}
 
 
   
