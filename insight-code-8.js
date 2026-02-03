@@ -180,6 +180,8 @@
 // NEW: fade + remove loading UI (min 2 seconds after page load)
 dismissLoadingUI();
 
+    }
+
   function captureTemplates() {
     const tProj = document.getElementById('project-card-template');
     if (tProj) { savedProjectTemplate = tProj.cloneNode(true); savedProjectTemplate.id=''; savedProjectTemplate.style.display=''; tProj.remove(); }
@@ -2680,7 +2682,7 @@ function setupFederalLandsOverlay() {
   });
 }
   
-}
+
 
   function dismissLoadingUI() {
   const a = document.getElementById('loading-progress-1');
@@ -2728,4 +2730,4 @@ function setupFederalLandsOverlay() {
   }, delay);
 }
 
-)();
+})();
