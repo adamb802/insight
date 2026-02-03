@@ -177,13 +177,8 @@
     // Enable the Federal Lands overlay toggle (no impact on your other logic)
   setupFederalLandsOverlay();
 
-    // Hide any older "loading-screen" overlay
-    const loader = document.getElementById('loading-screen');
-    if (loader) {
-      loader.classList.add('hidden');
-      setTimeout(() => { loader.style.display = 'none'; }, 400);
-    }
-  }
+// NEW: fade + remove loading UI (min 2 seconds after page load)
+dismissLoadingUI();
 
   function captureTemplates() {
     const tProj = document.getElementById('project-card-template');
@@ -297,51 +292,38 @@
   // ==============================
   // DATA LOADING
   // ==============================
-  async function loadData() {
-    const overlay   = document.getElementById('loading-progress');
-    const counterEl = document.getElementById('loading-counter');
+async function loadData() {
+  // ----- Projects (single fetch, cached server-side) -----
+  const resAll = await fetch(API_BASE + '/developmentsAll');
+  if (!resAll.ok) throw new Error('/developmentsAll failed: ' + resAll.status);
+  const dataAll = await resAll.json();
 
-    const showProgress = (n) => {
-      if (counterEl) counterEl.textContent = `${n.toLocaleString()} loaded`;
-      if (overlay) { overlay.style.display = 'block'; overlay.style.opacity = '1'; }
-    };
+  // keep your normalizer (safe)
+  allProjects = (dataAll.records || []).map(normalizeProject).filter(Boolean);
 
-    // ----- Projects (single fetch, cached server-side) -----
-    const resAll = await fetch(API_BASE + '/developmentsAll');
-    if (!resAll.ok) throw new Error('/developmentsAll failed: ' + resAll.status);
-    const dataAll = await resAll.json();
-    
-    // keep your normalizer (safe)
-    allProjects = (dataAll.records || []).map(normalizeProject).filter(Boolean);
-    
-    // show count in the loader UI if present
-    showProgress(allProjects.length);
-    
-    // ----- Counties (+ ordinance scores) -----
-    const resCounties = await fetch(API_BASE + '/counties');
-    if (!resCounties.ok) throw new Error('/counties failed');
-    const dataCounties = await resCounties.json();
+  // ----- Counties (+ ordinance scores) -----
+  const resCounties = await fetch(API_BASE + '/counties');
+  if (!resCounties.ok) throw new Error('/counties failed');
+  const dataCounties = await resCounties.json();
 
-    // Safe parse numbers, treat "NaN" as null
-    const parseScore = (v) => {
-      if (v === 'NaN' || v === '' || v == null) return null;
-      const n = Number(v);
-      return Number.isFinite(n) ? n : null;
-    };
+  // Safe parse numbers, treat "NaN" as null
+  const parseScore = (v) => {
+    if (v === 'NaN' || v === '' || v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
 
-    allCounties = (dataCounties.records || []).map(r => ({
-      fips: String(r.fips || '').trim(),
-      title: String(r.title || '').trim(),
-      stateTitle: String(r.stateTitle || '').trim(),
-      windScore:    parseScore(r.windScore ?? r.Wind_Score),
-      solarScore:   parseScore(r.solarScore ?? r.Solar_Score),
-      storageScore: parseScore(r.storageScore ?? r.Storage_Score)
-    })).filter(c => c.fips && c.title);
+  allCounties = (dataCounties.records || []).map(r => ({
+    fips: String(r.fips || '').trim(),
+    title: String(r.title || '').trim(),
+    stateTitle: String(r.stateTitle || '').trim(),
+    windScore:    parseScore(r.windScore ?? r.Wind_Score),
+    solarScore:   parseScore(r.solarScore ?? r.Solar_Score),
+    storageScore: parseScore(r.storageScore ?? r.Storage_Score)
+  })).filter(c => c.fips && c.title);
 
-    countyById = new Map(allCounties.map(c => [c.fips, c]));
-
-    if (overlay) { overlay.style.opacity = '0'; setTimeout(() => { overlay.style.display = 'none'; }, 250); }
-  }
+  countyById = new Map(allCounties.map(c => [c.fips, c]));
+}
 
   function normalizeProject(r) {
     const pick = (keys) => { for (const k of keys) { const v = r[k]; if (v !== undefined && v !== null && String(v).trim() !== '') return v; } return ''; };
@@ -586,13 +568,28 @@
     if (!stages.length || stages.length === STAGE_VALUES.length) return true;
     return stages.includes(p.stage);
   }
-  function matchSearch(p, q) {
-    if (!q) return true;
-    const hay = [
-      p.title, p.stage, p.developerText, p.locationText, p.tech1, p.tech2, p.tech3, p.stateTitle
-    ].join(' ').toLowerCase();
-    return hay.includes(q);
+function matchSearch(p, q) {
+  if (!q) return true;
+
+  // 1) Original project-based matching (unchanged)
+  const hay = [
+    p.title, p.stage, p.developerText, p.locationText, p.tech1, p.tech2, p.tech3, p.stateTitle
+  ].join(' ').toLowerCase();
+
+  if (hay.includes(q)) return true;
+
+  // 2) NEW: County + State record name matching (via the counties linked to this project)
+  const ids = Array.isArray(p.countyIds) ? p.countyIds : [];
+  for (const fips of ids) {
+    const c = countyById.get(fips);
+    if (!c) continue;
+
+    const countyHay = `${c.title || ''} ${c.stateTitle || ''}`.toLowerCase();
+    if (countyHay.includes(q)) return true;
   }
+
+  return false;
+}
   function matchStateCheckbox(p, statesSet) {
     if (!statesSet || statesSet.size === 0) return true;
     return statesSet.has(p.stateTitle);
@@ -1201,6 +1198,16 @@ function setFocusedProject(idx, { zoom = true } = {}) {
 }
 
 // Zoom to a set of counties
+function fitBoundsPaddingPx(rem = 5) {
+  try {
+    const fs = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const base = Number.isFinite(fs) ? fs : 16;
+    return Math.round(base * rem);
+  } catch {
+    return Math.round(16 * rem);
+  }
+}
+    
 function zoomToCountySet(fipsArr, maxZoom = 8) {
   if (!map || !Array.isArray(fipsArr) || fipsArr.length === 0) return;
 
@@ -1222,11 +1229,13 @@ function zoomToCountySet(fipsArr, maxZoom = 8) {
 
   if (!any) return;
 
-  map.fitBounds([[minX, minY], [maxX, maxY]], {
-    padding: 40,
-    duration: 650,
-    maxZoom
-  });
+    const pad = fitBoundsPaddingPx(5);
+    
+    map.fitBounds([[minX, minY], [maxX, maxY]], {
+      padding: pad,
+      duration: 650,
+      maxZoom
+    });
 }
 
 // ----- Dropdown builders -----
@@ -1486,8 +1495,10 @@ function renderCountyCardsInContainer(container, fipsArr) {
     if (!feat) return;
 
     const bbox = turf.bbox(feat); // [minX, minY, maxX, maxY]
+    const pad = fitBoundsPaddingPx(5);
+    
     map.fitBounds([[bbox[0], bbox[1]], [bbox[2], bbox[3]]], {
-      padding: 40,
+      padding: pad,
       duration: 650,
       maxZoom: 8
     });
@@ -2299,7 +2310,7 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
   // ==============================
   // LEGEND
   // ==============================
-  function updateMapKey() {
+function updateMapKey() {
   if (!mapKeyEl) return;
   const { mw: showMW, ord: showOrd } = colorToggles();
 
@@ -2309,27 +2320,57 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       .legend .title { font-weight: 800; margin-bottom: 6px; color:#0b1b3f; }
       .legend .subtitle { color:#6b7280; margin-bottom: 10px; }
 
-      :root { --cell:18px; --gap:3px; }
+      /* Scope the sizing vars to the legend so we don't touch global :root */
+      .legend { --cell:18px; --gap:3px; }
 
+      /* === Bivariate legend layout (fixed alignment) === */
+      .legend .bi-title { font-weight: 800; color:#0b1b3f; margin-bottom: 8px; }
       .legend .bi { display:flex; gap:10px; align-items:flex-start; }
-      .legend .ycol { display:flex; flex-direction:column; align-items:flex-start; }
-      .legend .ytitle { font-weight:600; color:#0b1b3f; margin-bottom:6px; } /* moved to top */
-      .legend .yticks {
-        display:flex; flex-direction:column; justify-content:space-between;
+
+      .legend .yticks{
         height: calc(var(--cell)*3 + var(--gap)*2);
+        display:flex;
+        flex-direction:column;
+        justify-content:space-between;
         color:#6b7280;
       }
+      .legend .yticks span { line-height: 1; }
 
-      .legend .grid { display:grid;
+      /* Lock grid column width so x labels align with the grid edges */
+      .legend .grid-col{
+        width: calc(var(--cell)*3 + var(--gap)*2);
+      }
+
+      .legend .grid{
+        display:grid;
         grid-template-columns: repeat(3, var(--cell));
         grid-template-rows: repeat(3, var(--cell));
         gap: var(--gap);
       }
-      .legend .cell { width:var(--cell); height:var(--cell); border-radius:3px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
+      .legend .cell{
+        width:var(--cell);
+        height:var(--cell);
+        border-radius:3px;
+        box-shadow: inset 0 0 0 1px rgba(0,0,0,.08);
+      }
 
-      .legend .xlabel { display:flex; justify-content:space-between; color:#6b7280; margin-top:6px; }
-      .legend .xtitle { text-align:center; font-weight:600; color:#0b1b3f; margin-top:2px; }
+      .legend .xlabel{
+        width: 100%;
+        display:flex;
+        justify-content:space-between;
+        color:#6b7280;
+        margin-top:6px;
+      }
+      .legend .xlabel span { line-height: 1; }
 
+      .legend .xtitle{
+        text-align:center;
+        font-weight:600;
+        color:#0b1b3f;
+        margin-top:2px;
+      }
+
+      /* === Univariate bars === */
       .legend .bar { display:flex; gap:2px; }
       .legend .bar .swatch { width:24px; height:14px; border-radius:3px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
       .legend .axis { display:flex; align-items:center; justify-content:space-between; color:#6b7280; margin-top:4px; }
@@ -2337,23 +2378,23 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
   `;
 
   if (showMW && showOrd) {
-    const rowsForLegend = [BIV9[2], BIV9[1], BIV9[0]]; // top row = ordinance HIGH
+    // top row = ordinance HIGH
+    const rowsForLegend = [BIV9[2], BIV9[1], BIV9[0]];
     const gridCells = rowsForLegend.map(
       row => row.map(c => `<div class="cell" style="background:${c}"></div>`).join('')
     ).join('');
 
     mapKeyEl.innerHTML = css + `
       <div class="legend">
+        <div class="bi-title">Ordinance Workability</div>
+
         <div class="bi">
-          <div class="ycol">
-            <div class="ytitle">Ordinance Workability</div>
-            <div class="yticks" aria-hidden="true">
-              <span>High</span>
-              <span>Low</span>
-            </div>
+          <div class="yticks" aria-hidden="true">
+            <span>High</span>
+            <span>Low</span>
           </div>
 
-          <div>
+          <div class="grid-col">
             <div class="grid" aria-label="Bivariate legend grid">${gridCells}</div>
             <div class="xlabel"><span>Low</span><span>High</span></div>
             <div class="xtitle">Energy Capacity</div>
@@ -2361,7 +2402,10 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         </div>
       </div>
     `;
-  } else if (showMW) {
+    return;
+  }
+
+  if (showMW) {
     mapKeyEl.innerHTML = css + `
       <div class="legend">
         <div class="title">Energy Capacity</div>
@@ -2370,7 +2414,10 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         <div class="axis"><span>Low</span><span>High</span></div>
       </div>
     `;
-  } else if (showOrd) {
+    return;
+  }
+
+  if (showOrd) {
     mapKeyEl.innerHTML = css + `
       <div class="legend">
         <div class="title">Ordinance Workability</div>
@@ -2379,15 +2426,17 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         <div class="axis"><span>Low</span><span>High</span></div>
       </div>
     `;
-  } else {
-    mapKeyEl.innerHTML = css + `
-      <div class="legend">
-        <div class="title">No color layers active</div>
-        <div class="subtitle">Enable Energy and/or Ordinance in “Map Coloring”.</div>
-      </div>
-    `;
+    return;
   }
+
+  mapKeyEl.innerHTML = css + `
+    <div class="legend">
+      <div class="title">No color layers active</div>
+      <div class="subtitle">Enable Energy and/or Ordinance in “Map Coloring”.</div>
+    </div>
+  `;
 }
+    
   // ==============================
   // HELPERS
   // ==============================
@@ -2516,6 +2565,11 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
 
         node.classList.toggle('is-hovered', isHover);
         node.classList.toggle('is-selected', isSel);
+        
+        // NEW: focused class on the selected card in secondary-tab mode
+        const isFocusedProject = (focusedProjectIdx != null) &&
+          (String(node.dataset.projectIdx || '') === String(focusedProjectIdx));
+        node.classList.toggle('focused', isFocusedProject);
       });
     }
 
@@ -2525,6 +2579,9 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         const fips = String(node.dataset.fips || '');
         node.classList.toggle('is-hovered', !!hoverFips && fips === hoverFips);
         node.classList.toggle('is-selected', !!focusFips && fips === focusFips);
+        
+        // NEW
+        node.classList.toggle('focused', !!focusedCountyId && fips === focusedCountyId);
       });
     }
 
@@ -2534,6 +2591,9 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         const st = String(node.dataset.state || '');
         node.classList.toggle('is-hovered', !!hoverState && st === hoverState);
         node.classList.toggle('is-selected', !!focusState && st === focusState);
+        
+        // NEW
+        node.classList.toggle('focused', !!focusedStateName && st === focusedStateName);
       });
     }
   }
@@ -2620,4 +2680,52 @@ function setupFederalLandsOverlay() {
   });
 }
   
-})();
+}
+
+  function dismissLoadingUI() {
+  const a = document.getElementById('loading-progress-1');
+  const b = document.getElementById('loading-progress-2');
+
+  // Keep legacy support if it still exists in the DOM
+  const legacy = document.getElementById('loading-screen');
+
+  const els = [a, b, legacy].filter(Boolean);
+  if (!els.length) return;
+
+  // Must wait at least 2s after navigation start (page load)
+  const minMs = 2000;
+  let delay = minMs;
+
+  try {
+    if (window.performance && typeof performance.now === 'function') {
+      delay = Math.max(0, minMs - performance.now());
+    }
+  } catch {
+    delay = minMs;
+  }
+
+  setTimeout(() => {
+    // Ensure a smooth fade even if your CSS doesn't define it
+    els.forEach(el => {
+      if (!el) return;
+      if (!el.style.transition) el.style.transition = 'opacity 450ms ease';
+      el.style.willChange = 'opacity';
+    });
+
+    // Next frame -> trigger opacity transition
+    requestAnimationFrame(() => {
+      els.forEach(el => { if (el) el.style.opacity = '0'; });
+    });
+
+    // Remove from DOM after the fade
+    setTimeout(() => {
+      els.forEach(el => {
+        if (!el) return;
+        try { el.remove(); }
+        catch { el.parentNode && el.parentNode.removeChild(el); }
+      });
+    }, 520);
+  }, delay);
+}
+
+)();
