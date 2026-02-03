@@ -24,6 +24,21 @@
   const STAGE_VALUES = ['Early','Mid','Late','Approved','Inactive'];
   const LIST_PAGE_SIZE = 50;
 
+  // Used for Govt. & Media records (State Abbreviation -> full state name)
+const STATE_ABBR_TO_NAME = {
+  AL:'Alabama', AK:'Alaska', AZ:'Arizona', AR:'Arkansas', CA:'California',
+  CO:'Colorado', CT:'Connecticut', DE:'Delaware', FL:'Florida', GA:'Georgia',
+  HI:'Hawaii', ID:'Idaho', IL:'Illinois', IN:'Indiana', IA:'Iowa',
+  KS:'Kansas', KY:'Kentucky', LA:'Louisiana', ME:'Maine', MD:'Maryland',
+  MA:'Massachusetts', MI:'Michigan', MN:'Minnesota', MS:'Mississippi', MO:'Missouri',
+  MT:'Montana', NE:'Nebraska', NV:'Nevada', NH:'New Hampshire', NJ:'New Jersey',
+  NM:'New Mexico', NY:'New York', NC:'North Carolina', ND:'North Dakota', OH:'Ohio',
+  OK:'Oklahoma', OR:'Oregon', PA:'Pennsylvania', RI:'Rhode Island', SC:'South Carolina',
+  SD:'South Dakota', TN:'Tennessee', TX:'Texas', UT:'Utah', VT:'Vermont',
+  VA:'Virginia', WA:'Washington', WV:'West Virginia', WI:'Wisconsin', WY:'Wyoming',
+  DC:'District of Columbia'
+};
+
   // ==============================
   // STATE
   // ==============================
@@ -67,6 +82,12 @@
   let allCounties = [];
   let countyById = new Map(); // key: FIPS
 
+  // Govt. & Media dataset (secondary-tab only; does NOT affect map)
+  let allGovMedia = [];                 // normalized records from /govMedia
+  let govMediaByCounty = new Map();     // fips -> Set<idx in allGovMedia>
+  let govMediaByState  = new Map();     // stateTitle -> Set<idx in allGovMedia>
+  let govMediaLoadState = { loaded:false, loading:false, error:null };
+
   const projectsByCounty = new Map();
   const stateIndex = new Map(); // stateTitle -> { countyIds:Set, projectIdxs:Set }
 
@@ -98,6 +119,7 @@
   let savedProjectTemplate = null;
   let savedCountyTemplate = null;
   let savedStateTemplate = null;
+  let savedGovMediaTemplate = null; // NEW
 
   let listCursorProjects = 0;
   let listCursorCounties = 0;
@@ -172,10 +194,13 @@
       renderCurrentList(true);
     }
 
-    wireUI();
+wireUI();
 
-    // Enable the Federal Lands overlay toggle (no impact on your other logic)
-  setupFederalLandsOverlay();
+// Start Govt. & Media fetch in the background (does NOT block initial load)
+loadGovMediaDataInBackground();
+
+// Enable the Federal Lands overlay toggle (no impact on your other logic)
+setupFederalLandsOverlay();
 
 // NEW: fade + remove loading UI (min 2 seconds after page load)
 dismissLoadingUI();
@@ -189,6 +214,13 @@ dismissLoadingUI();
     if (tCounty) { savedCountyTemplate = tCounty.cloneNode(true); savedCountyTemplate.id=''; savedCountyTemplate.style.display=''; tCounty.remove(); }
     const tState = document.getElementById('state-card-template');
     if (tState) { savedStateTemplate = tState.cloneNode(true); savedStateTemplate.id=''; savedStateTemplate.style.display=''; tState.remove(); }
+      const tGov = document.getElementById('gov-media-card-template');
+      if (tGov) {
+        savedGovMediaTemplate = tGov.cloneNode(true);
+        savedGovMediaTemplate.id = '';
+        savedGovMediaTemplate.style.display = '';
+        tGov.remove();
+      }
   }
 
   async function initMap() {
@@ -388,6 +420,312 @@ async function loadData() {
       entry.projectIdxs.add(idx);
     });
   }
+
+  // ==============================
+// GOVT. & MEDIA (secondary tab)
+// ==============================
+
+function loadGovMediaDataInBackground() {
+  if (govMediaLoadState.loading || govMediaLoadState.loaded) return;
+
+  govMediaLoadState.loading = true;
+  govMediaLoadState.error = null;
+
+  fetch(API_BASE + '/govMedia')
+    .then(res => {
+      if (!res.ok) throw new Error('/govMedia failed: ' + res.status);
+      return res.json();
+    })
+    .then(data => {
+      allGovMedia = (data.records || []).map(normalizeGovMediaRecord).filter(Boolean);
+      buildGovMediaIndexes();
+    })
+    .catch(err => {
+      console.error('Govt. & Media fetch failed', err);
+      govMediaLoadState.error = err;
+    })
+    .finally(() => {
+      govMediaLoadState.loading = false;
+      govMediaLoadState.loaded = true;
+
+      // If user is already on Govt. & Media tab, rerender so list appears
+      if (isGovMediaTabActiveForCurrentSelection()) {
+        renderCurrentList(false);
+      }
+    });
+}
+
+function isGovMediaTabActiveForCurrentSelection() {
+  if (focusedStateName && stateDropdownTab === 'media') return true;
+  if (focusedCountyId && countyDropdownTab === 'media') return true;
+  if (focusedProjectIdx != null && projectDropdownTab === 'media') return true;
+  return false;
+}
+
+function normalizeGovMediaRecord(r) {
+  if (!r) return null;
+
+  const title = String(r.title || '').trim();
+  const source = String(r.source || '').trim();
+  const webpageUrl = normalizeUrl(r.webpageUrl);
+  const type = String(r.type || '').trim();
+
+  const stateAbbr = String(r.stateAbbr || '').trim().toUpperCase();
+  const stateTitle = STATE_ABBR_TO_NAME[stateAbbr] || '';
+
+  const countyFips = parseCountyFipsList(r.countyFips);
+  const publishedDate = parseDateOnlyUTC(r.publishedDate);
+
+  return {
+    id: r.id,
+    title,
+    source,
+    webpageUrl,
+    countyFips,
+    stateAbbr,
+    stateTitle,
+    publishedDate,
+    type
+  };
+}
+
+function normalizeUrl(url) {
+  const s = String(url || '').trim();
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  if (s.startsWith('//')) return 'https:' + s;
+  return 'https://' + s;
+}
+
+// Accept comma/space/semicolon separated county FIPS; normalize to 5 digits
+function parseCountyFipsList(raw) {
+  const s = Array.isArray(raw) ? raw.join(',') : String(raw || '');
+  return s
+    .split(/[\s,;]+/g)
+    .map(normalizeCountyFips)
+    .filter(Boolean);
+}
+
+function normalizeCountyFips(tok) {
+  let t = String(tok || '').trim();
+  if (!t) return '';
+  t = t.replace(/[^\d]/g, '');
+  if (!t) return '';
+  if (t.length < 5) t = t.padStart(5, '0');
+  return t;
+}
+
+// Parse either `YYYY-MM-DD` or full ISO; returns a Date aligned to UTC date
+function parseDateOnlyUTC(v) {
+  const s = String(v || '').trim();
+  if (!s) return null;
+  const d = s.includes('T') ? new Date(s) : new Date(s + 'T00:00:00Z');
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function buildGovMediaIndexes() {
+  govMediaByCounty.clear();
+  govMediaByState.clear();
+
+  allGovMedia.forEach((gm, idx) => {
+    // Always link to state (even if also linked to counties)
+    if (gm.stateTitle) {
+      if (!govMediaByState.has(gm.stateTitle)) govMediaByState.set(gm.stateTitle, new Set());
+      govMediaByState.get(gm.stateTitle).add(idx);
+    }
+
+    // Link to each county (if any)
+    (gm.countyFips || []).forEach(fips => {
+      if (!fips) return;
+      if (!govMediaByCounty.has(fips)) govMediaByCounty.set(fips, new Set());
+      govMediaByCounty.get(fips).add(idx);
+    });
+  });
+}
+
+function govMediaIdxsForState(stateTitle) {
+  return Array.from(govMediaByState.get(stateTitle) || []);
+}
+
+function govMediaIdxsForCounty(fips) {
+  return Array.from(govMediaByCounty.get(fips) || []);
+}
+
+// Project -> associated county -> show records linked to that county
+function govMediaIdxsForProject(projectIdx) {
+  const p = allProjects[projectIdx];
+  const primaryFips = (p && Array.isArray(p.countyIds) && p.countyIds[0]) ? String(p.countyIds[0]) : '';
+  return primaryFips ? govMediaIdxsForCounty(primaryFips) : [];
+}
+
+function renderGovMediaCardsInContainer(container, idxArr, emptySubject) {
+  if (!container) return;
+  clear(container);
+
+  // Ensure fetch is started (but never awaited)
+  loadGovMediaDataInBackground();
+
+  // Loading / error states
+  if (!govMediaLoadState.loaded) {
+    const msg = document.createElement('div');
+    msg.className = 'dropdown-empty';
+    msg.textContent = 'Loading Government and Media assets…';
+    container.appendChild(msg);
+    return;
+  }
+  if (govMediaLoadState.error) {
+    const msg = document.createElement('div');
+    msg.className = 'dropdown-empty';
+    msg.textContent = 'Unable to load Government and Media assets.';
+    container.appendChild(msg);
+    return;
+  }
+
+  const arr = (idxArr || []).filter(i => allGovMedia[i]);
+
+  // Sort newest first
+  arr.sort((a, b) => {
+    const A = allGovMedia[a];
+    const B = allGovMedia[b];
+    const ta = A?.publishedDate ? A.publishedDate.getTime() : 0;
+    const tb = B?.publishedDate ? B.publishedDate.getTime() : 0;
+    if (tb !== ta) return tb - ta;
+    return String(A?.title || '').localeCompare(String(B?.title || ''));
+  });
+
+  if (!arr.length) {
+    const msg = document.createElement('div');
+    msg.className = 'dropdown-empty';
+    msg.textContent = `The selected ${emptySubject} does not currently have any Government or Media assets.`;
+    container.appendChild(msg);
+    return;
+  }
+
+  let cursor = 0;
+  const renderMore = () => {
+    removeLoadMore(container);
+    const next = arr.slice(cursor, cursor + LIST_PAGE_SIZE);
+    next.forEach(i => container.appendChild(makeGovMediaCard(allGovMedia[i])));
+    cursor += next.length;
+    if (cursor < arr.length) addLoadMore(container, renderMore);
+  };
+  renderMore();
+}
+
+function makeGovMediaCard(rec) {
+  if (!rec) return document.createElement('div');
+
+  if (savedGovMediaTemplate) {
+    const node = savedGovMediaTemplate.cloneNode(true);
+
+    // Link the card to Webpage URL (open in new tab)
+    attachGovMediaLink(node, rec.webpageUrl);
+
+    // data-field mappings (remove elements if missing)
+    setFieldOrRemove(node, 'title', rec.title);
+    setFieldOrRemove(node, 'media-source', rec.source);
+
+    // Location label:
+    // - If county-linked: "Dallas County, TX" (from your county title)
+    // - Else: "New York" (state name)
+    const loc = computeGovMediaLocationLabel(rec);
+    setFieldOrRemove(node, 'location', loc);
+
+    // Published Date -> "November 10, 2025"
+    const dateText = rec.publishedDate ? formatLongUSDate(rec.publishedDate) : '';
+    setFieldOrRemove(node, 'published-date', dateText);
+
+    // Type chips
+    const type = String(rec.type || '').trim();
+    const mediaEl = node.querySelector('[data-element="type-media"]');
+    const govEl   = node.querySelector('[data-element="type-government"]');
+
+    if (type === 'Media') {
+      if (mediaEl) mediaEl.style.display = 'flex';
+    } else if (mediaEl) {
+      mediaEl.remove();
+    }
+
+    if (type === 'Government') {
+      if (govEl) govEl.style.display = 'flex';
+    } else if (govEl) {
+      govEl.remove();
+    }
+
+    return node;
+  }
+
+  // Fallback (if template missing)
+  const div = document.createElement('div');
+  div.style.cssText = 'border:1px solid #eee; padding:10px;';
+  div.textContent = rec.title || '(Untitled)';
+  attachGovMediaLink(div, rec.webpageUrl);
+  return div;
+}
+
+function attachGovMediaLink(node, url) {
+  const u = String(url || '').trim();
+  if (!u) return;
+
+  const tag = (node.tagName || '').toLowerCase();
+
+  // If template root is an <a>, set href/target/rel
+  if (tag === 'a') {
+    node.href = u;
+    node.target = '_blank';
+    node.rel = 'noopener noreferrer';
+    return;
+  }
+
+  // Otherwise, make div act like a link
+  node.style.cursor = 'pointer';
+  node.setAttribute('role', 'link');
+  node.setAttribute('tabindex', '0');
+
+  const open = () => window.open(u, '_blank', 'noopener,noreferrer');
+
+  node.addEventListener('click', (e) => {
+    e.preventDefault();
+    open();
+  });
+
+  node.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      open();
+    }
+  });
+}
+
+function computeGovMediaLocationLabel(rec) {
+  const fipsArr = Array.isArray(rec.countyFips) ? rec.countyFips : [];
+  if (fipsArr.length) {
+    const names = fipsArr.map(f => countyById.get(f)?.title || '').filter(Boolean);
+    return names.length ? names.join(' • ') : fipsArr.join(' • ');
+  }
+  return rec.stateTitle || '';
+}
+
+function formatLongUSDate(dateObj) {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC'
+    }).format(dateObj);
+  } catch {
+    return '';
+  }
+}
+
+function setFieldOrRemove(root, field, value) {
+  const el = root.querySelector('[data-field="' + field + '"]');
+  if (!el) return;
+  const v = value == null ? '' : String(value).trim();
+  if (!v) { el.remove(); return; }
+  el.textContent = v;
+}
 
   // --- County ID helpers (normalize to string) ---
   function inferCountyIdProp(geo) {
@@ -1285,8 +1623,7 @@ function buildStateDropdown(stateName) {
     options: [
       { value: 'projects', label: 'Projects' },
       { value: 'counties', label: 'Counties' },
-      { value: 'media', label: 'Media' },
-      { value: 'ordinances', label: 'Ordinances' }
+      { value: 'media', label: 'Govt. & Media' }
     ],
     onChange: (val) => { stateDropdownTab = val; renderCurrentList(true); }
   });
@@ -1304,6 +1641,13 @@ function buildStateDropdown(stateName) {
     list.className = 'counties-list';
     wrap.appendChild(list);
     renderCountyCardsInContainer(list, Array.from(visibleCountyIds));
+  } else if (stateDropdownTab === 'media') {
+  const list = document.createElement('div');
+  list.className = 'gov-media-list';
+  wrap.appendChild(list);
+
+    // State -> show all records in that state (county-linked + state-only)
+    renderGovMediaCardsInContainer(list, govMediaIdxsForState(stateName), 'state');
   } else {
     const msg = document.createElement('div');
     msg.className = 'dropdown-empty';
@@ -1328,8 +1672,7 @@ function buildCountyDropdown(fips) {
     selectedValue: countyDropdownTab,
     options: [
       { value: 'projects', label: 'Projects' },
-      { value: 'media', label: 'Media' },
-      { value: 'ordinances', label: 'Ordinances' }
+      { value: 'media', label: 'Govt. & Media' }
     ],
     onChange: (val) => { countyDropdownTab = val; renderCurrentList(true); }
   });
@@ -1337,17 +1680,24 @@ function buildCountyDropdown(fips) {
   tabsWrap.appendChild(seg);
   wrap.appendChild(tabsWrap);
 
-  if (countyDropdownTab === 'projects') {
-    const list = document.createElement('div');
-    list.className = 'project-list';
-    wrap.appendChild(list);
-    renderProjectCardsInContainer(list, Array.from(visibleProjectIdxs));
-  } else {
-    const msg = document.createElement('div');
-    msg.className = 'dropdown-empty';
-    msg.textContent = 'Coming soon.';
-    wrap.appendChild(msg);
-  }
+ if (countyDropdownTab === 'projects') {
+  const list = document.createElement('div');
+  list.className = 'project-list';
+  wrap.appendChild(list);
+  renderProjectCardsInContainer(list, Array.from(visibleProjectIdxs));
+} else if (countyDropdownTab === 'media') {
+  const list = document.createElement('div');
+  list.className = 'gov-media-list';
+  wrap.appendChild(list);
+
+  // County -> only records linked to this county
+  renderGovMediaCardsInContainer(list, govMediaIdxsForCounty(fips), 'county');
+} else {
+  const msg = document.createElement('div');
+  msg.className = 'dropdown-empty';
+  msg.textContent = 'Coming soon.';
+  wrap.appendChild(msg);
+}
 
   return wrap;
 }
@@ -1365,8 +1715,7 @@ function buildProjectDropdown(idx) {
     groupName: group,
     selectedValue: projectDropdownTab,
     options: [
-      { value: 'media', label: 'Media' },
-      { value: 'ordinances', label: 'Ordinances' }
+      { value: 'media', label: 'Govt. & Media' }
     ],
     onChange: (val) => { projectDropdownTab = val; renderCurrentList(true); }
   });
@@ -1374,10 +1723,19 @@ function buildProjectDropdown(idx) {
   tabsWrap.appendChild(seg);
   wrap.appendChild(tabsWrap);
 
-  const msg = document.createElement('div');
-  msg.className = 'dropdown-empty';
-  msg.textContent = 'Coming soon.';
-  wrap.appendChild(msg);
+  if (projectDropdownTab === 'media') {
+    const list = document.createElement('div');
+    list.className = 'gov-media-list';
+    wrap.appendChild(list);
+  
+    // Project -> records linked to the project's associated county (primary countyIds[0])
+    renderGovMediaCardsInContainer(list, govMediaIdxsForProject(idx), 'project');
+  } else {
+    const msg = document.createElement('div');
+    msg.className = 'dropdown-empty';
+    msg.textContent = 'Coming soon.';
+    wrap.appendChild(msg);
+  }
 
   return wrap;
 }
@@ -2535,7 +2893,8 @@ function updateMapKey() {
       }
       .dropdown-tab-container { margin-bottom: 10px; }
       .dropdown-list .project-list,
-      .dropdown-list .counties-list {
+      .dropdown-list .counties-list,
+      .dropdown-list .gov-media-list {
         display: flex;
         flex-direction: column;
         gap: 10px;
