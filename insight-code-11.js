@@ -2124,9 +2124,7 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
   if (savedProjectTemplate) {
     const node = savedProjectTemplate.cloneNode(true);
     setField(node, 'title', rec.title);
-    setField(node, 'technology-1', rec.tech1);
-    setField(node, 'technology-2', rec.tech2);
-    setField(node, 'technology-3', rec.tech3);
+    syncProjectTechnologyBadges(node, rec);
     setField(node, 'stage', rec.stage);
     setField(node, 'location-text', rec.locationText);
     setField(node, 'developer-text', rec.developerText);
@@ -2146,7 +2144,6 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     node.addEventListener('mouseleave', () => setHoveredCounty(null));
 
     node.addEventListener('click', (e) => {
-      if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
       if (projectIdx != null) toggleFocusedProject(projectIdx);
     });
 
@@ -2178,10 +2175,8 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
     div.addEventListener('mouseleave', () => setHoveredCounty(null));
 
     div.addEventListener('click', (e) => {
-      if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
       if (projectIdx != null) toggleFocusedProject(projectIdx);
     });
-
     return div;
   }
 }
@@ -2287,9 +2282,8 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         hideHoverPopup();
       });
       node.addEventListener('click', (e) => {
-        if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
-        toggleFocusedCounty(fips);
-      });
+      toggleFocusedCounty(fips);
+    });
 
       return node;
     } else {
@@ -2313,9 +2307,8 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       div.addEventListener('mouseenter', () => setHoveredCounty(fips, getCountyCenterLngLat(fips)));
       div.addEventListener('mouseleave', () => { setHoveredCounty(null); hideHoverPopup(); });
       div.addEventListener('click', (e) => {
-        if (e.target && e.target.closest && e.target.closest('.dropdown-list')) return;
-        toggleFocusedCounty(fips);
-      });
+          toggleFocusedCounty(fips);
+        });
       
       return div;
     }
@@ -2683,9 +2676,26 @@ function updateMapKey() {
       /* Scope the sizing vars to the legend so we don't touch global :root */
       .legend { --cell:18px; --gap:3px; }
 
+     /* === Bivariate legend: make the legend itself horizontal when used as bivariate === */
+     .legend.legend-bi{
+       display:flex;
+       flex-direction:row;
+       align-items:flex-start; /* top-align with grid */
+       gap:12px;
+     }
+
       /* === Bivariate legend layout (fixed alignment) === */
-      .legend .bi-title { font-weight: 800; color:#0b1b3f; margin-bottom: 8px; }
       .legend .bi { display:flex; gap:10px; align-items:flex-start; }
+
+     /* Left-side bivariate title (stacked + vertically centered to grid height) */
+     .legend .ytitle{
+       height: calc(var(--cell)*3 + var(--gap)*2);
+       display:flex;
+       flex-direction:column;
+      justify-content:center;  /* centers Ordinance/Workability vs grid */
+       align-items:center;
+       margin-right:2px;
+     }
 
       .legend .yticks{
         height: calc(var(--cell)*3 + var(--gap)*2);
@@ -2728,7 +2738,16 @@ function updateMapKey() {
         font-weight:600;
         color:#0b1b3f;
         margin-top:2px;
+       /* tighter spacing between stacked words */
+       line-height:1.05;
+       display:flex;
+       flex-direction:column;
+      gap:0;
       }
+     .legend .xtitle span{ display:block; } /* ensures stacked lines */
+
+     /* ytitle uses xtitle styling but shouldn't have the x margin-top */
+     .legend .ytitle.xtitle{ margin-top:0; }
 
       /* === Univariate bars === */
       .legend .bar { display:flex; gap:2px; }
@@ -2745,22 +2764,29 @@ function updateMapKey() {
     ).join('');
 
     mapKeyEl.innerHTML = css + `
-      <div class="legend">
-        <div class="bi-title">Ordinance Workability</div>
+     <div class="legend legend-bi">
+       <!-- Left title: centered vs the 3x3 grid -->
+       <div class="ytitle xtitle">
+         <span>Ordinance</span>
+         <span>Workability</span>
+       </div>
 
-        <div class="bi">
-          <div class="yticks" aria-hidden="true">
-            <span>High</span>
-            <span>Low</span>
-          </div>
+       <div class="bi">
+         <div class="yticks" aria-hidden="true">
+           <span>High</span>
+           <span>Low</span>
+         </div>
 
-          <div class="grid-col">
-            <div class="grid" aria-label="Bivariate legend grid">${gridCells}</div>
-            <div class="xlabel"><span>Low</span><span>High</span></div>
-            <div class="xtitle">Energy Capacity</div>
-          </div>
-        </div>
-      </div>
+         <div class="grid-col">
+           <div class="grid" aria-label="Bivariate legend grid">${gridCells}</div>
+           <div class="xlabel"><span>Low</span><span>High</span></div>
+           <div class="xtitle">
+             <span>Energy</span>
+             <span>Capacity</span>
+           </div>
+         </div>
+       </div>
+     </div>
     `;
     return;
   }
@@ -2804,6 +2830,67 @@ function updateMapKey() {
     const el = root.querySelector('[data-field="' + field + '"]');
     if (el) el.textContent = value == null ? '' : String(value);
   }
+  function syncProjectTechnologyBadges(root, rec) {
+  // Convert tech text -> one of: 'solar' | 'wind' | 'storage'
+  const toKey = (v) => {
+    const s = String(v || '').toLowerCase();
+    if (!s) return '';
+    if (s.includes('wind')) return 'wind';
+    if (s.includes('solar')) return 'solar';
+    if (s.includes('storage') || s.includes('battery') || s.includes('bess')) return 'storage';
+    return '';
+  };
+
+  // Desired order comes from technology-1,2,3 (rec.tech1/2/3)
+  const desired = [];
+  [rec.tech1, rec.tech2, rec.tech3].forEach(v => {
+    const k = toKey(v);
+    if (k && !desired.includes(k)) desired.push(k);
+  });
+
+  const els = {
+    solar:   root.querySelector('[data-element="technology-solar"]'),
+    wind:    root.querySelector('[data-element="technology-wind"]'),
+    storage: root.querySelector('[data-element="technology-storage"]')
+  };
+
+  const allKeys = ['solar', 'wind', 'storage'];
+  const presentEls = allKeys.map(k => els[k]).filter(Boolean);
+  if (!presentEls.length) return; // template doesn't have these chips
+
+  // Hide everything first
+  allKeys.forEach(k => { if (els[k]) els[k].style.display = 'none'; });
+
+  // Show only the technologies that exist on this project
+  desired.forEach(k => { if (els[k]) els[k].style.display = ''; });
+
+  // Reorder chips within their current parent, keeping their block location stable
+  const parent = presentEls[0].parentNode;
+  if (!parent) return;
+  if (!presentEls.every(n => n.parentNode === parent)) return; // safety
+
+  // Preserve where the chip-group sits by reinserting before the node after the last chip
+  const kids = Array.from(parent.childNodes);
+  const domSorted = presentEls.slice().sort((a, b) => kids.indexOf(a) - kids.indexOf(b));
+  const after = domSorted[domSorted.length - 1].nextSibling;
+
+  // Pull out all chip elements (so we can insert in the right order)
+  domSorted.forEach(n => {
+    try { parent.removeChild(n); } catch {}
+  });
+
+  // Insert back: visible ones in desired order, then the hidden ones (order doesn't matter)
+  const inserted = [];
+  desired.forEach(k => {
+    const el = els[k];
+    if (el) { parent.insertBefore(el, after); inserted.push(k); }
+  });
+  allKeys.forEach(k => {
+    if (inserted.includes(k)) return;
+    const el = els[k];
+    if (el) parent.insertBefore(el, after);
+  });
+}
   function setWrapper(root, wrapper, isActive) {
     const w = root.querySelector('[data-wrapper="' + wrapper + '"]');
     if (w) w.classList.toggle('inactive', !isActive);
