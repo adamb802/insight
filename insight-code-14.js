@@ -127,6 +127,7 @@ const STATE_ABBR_TO_NAME = {
   let savedGovMediaTemplate = null; // NEW
   let savedOrdinanceTemplate = null;       // NEW (Regulatory)
   let savedJurisdictionalTemplate = null;  // NEW (Regulatory)
+  let savedBanMoratoriumTemplate = null;   // NEW (Regulatory)
 
   let listCursorProjects = 0;
   let listCursorCounties = 0;
@@ -241,6 +242,16 @@ dismissLoadingUI();
     }
 
     const tJur = document.getElementById('jurisdictional-card-template');
+
+    // NEW: Ban / Moratorium template
+    const tBan = document.getElementById('ban-moratorium-card-template');
+    if (tBan) {
+      savedBanMoratoriumTemplate = tBan.cloneNode(true);
+      savedBanMoratoriumTemplate.id = '';
+      savedBanMoratoriumTemplate.style.display = '';
+      tBan.remove();
+    }
+    
     if (tJur) {
       savedJurisdictionalTemplate = tJur.cloneNode(true);
       savedJurisdictionalTemplate.id = '';
@@ -383,7 +394,14 @@ async function loadData() {
 
     // NEW: Regulatory URLs coming from Cloud Run /counties payload
     jurisdictionalUrl: normalizeUrl(r.jurisdictionalUrl || ''),
-    zoningOrdinanceUrl: normalizeUrl(r.zoningOrdinanceUrl || '')
+    zoningOrdinanceUrl: normalizeUrl(r.zoningOrdinanceUrl || ''),
+    // NEW: Ban / Moratorium flags (raw text: "0" | "2" | "")
+    solarBan:        String(r.solarBan ?? '').trim(),
+    windBan:         String(r.windBan ?? '').trim(),
+    bessBan:         String(r.bessBan ?? '').trim(),
+    solarMoratorium: String(r.solarMoratorium ?? '').trim(),
+    windMoratorium:  String(r.windMoratorium ?? '').trim(),
+    bessMoratorium:  String(r.bessMoratorium ?? '').trim(),
   })).filter(c => c.fips && c.title);
 
   countyById = new Map(allCounties.map(c => [c.fips, c]));
@@ -868,7 +886,30 @@ function setDataTitle(root, key, value) {
   el.textContent = value == null ? '' : String(value);
 }
 
+  // NEW: helper for ban/moratorium fields ("2" => ✅ No ..., "0" => ⚠️ ...)
+function addBanMoratoriumSummary(out, rawValue, textWhen2, textWhen0) {
+  const v = rawValue == null ? '' : String(rawValue).trim();
+  if (v === '2') out.push(textWhen2);
+  else if (v === '0') out.push(textWhen0);
+}
+
+// NEW: build a Ban/Moratorium card from the template
+function makeBanMoratoriumRegCard(summaryText) {
+  if (savedBanMoratoriumTemplate) {
+    const node = savedBanMoratoriumTemplate.cloneNode(true);
+    setField(node, 'summary', summaryText); // template has [data-field="summary"]
+    return node;
+  }
+
+  // Fallback if template missing
+  const div = document.createElement('div');
+  div.style.cssText = 'border:1px solid #eee; padding:10px;';
+  div.textContent = summaryText;
+  return div;
+}
+
 // Render 0–2 cards (jurisdictional + ordinance) or the empty message
+// Render 0–8 cards (0–6 ban/moratorium + optional jurisdictional + ordinance) or the empty message
 function renderRegulatoryCardsInContainer(container, countyFips) {
   if (!container) return;
   clear(container);
@@ -884,13 +925,28 @@ function renderRegulatoryCardsInContainer(container, countyFips) {
   const hasJur = !!jurUrl;
   const hasOrd = !!ordUrl;
 
-  if (!hasJur && !hasOrd) {
+  // NEW: Ban/Moratorium summary cards driven by Airtable raw text fields
+  const bm = [];
+  addBanMoratoriumSummary(bm, c?.solarBan,        '✅ No Solar Ban',        '⚠️ Solar Ban');
+  addBanMoratoriumSummary(bm, c?.windBan,         '✅ No Wind Ban',         '⚠️ Wind Ban');
+  addBanMoratoriumSummary(bm, c?.bessBan,         '✅ No BESS Ban',         '⚠️ BESS Ban');
+  addBanMoratoriumSummary(bm, c?.solarMoratorium, '✅ No Solar Moratorium', '⚠️ Solar Moratorium');
+  addBanMoratoriumSummary(bm, c?.windMoratorium,  '✅ No Wind Moratorium',  '⚠️ Wind Moratorium');
+  addBanMoratoriumSummary(bm, c?.bessMoratorium,  '✅ No BESS Moratorium',  '⚠️ BESS Moratorium');
+
+  const hasBM = bm.length > 0;
+
+  // IMPORTANT: previously this only considered URLs; now it also considers ban/moratorium cards
+  if (!hasJur && !hasOrd && !hasBM) {
     const msg = document.createElement('div');
     msg.className = 'dropdown-empty';
     msg.textContent = 'The selected county does not currently have any regulatory information.';
     container.appendChild(msg);
     return;
   }
+
+  // Order: show ban/moratorium cards first (easy to scan), then link cards
+  bm.forEach(text => container.appendChild(makeBanMoratoriumRegCard(text)));
 
   if (hasJur) container.appendChild(makeJurisdictionalRegCard(countyName, jurUrl));
   if (hasOrd) container.appendChild(makeOrdinanceRegCard(countyName, ordUrl));
@@ -2181,13 +2237,33 @@ function tertileClassForValue(v, cuts) {
 }
 
 // Apply + keep tidy: remove any previous classes, then (if active) add new one.
-function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts) {
+// NEW: supports forceBase to use the "base" class when no meaningful comparison exists.
+function setIconTertileClass(
+  root,
+  wrapperName,
+  iconName,
+  isActive,
+  value,
+  cuts,
+  { forceBase = false } = {}
+) {
   const wrapper = root.querySelector(`[data-wrapper="${wrapperName}"]`);
   if (!wrapper) return;
+
   const icon = wrapper.querySelector(`[data-icon="${iconName}"]`);
   if (!icon) return;
-  icon.classList.remove('green','yellow','red');
+
+  // Always clear previous state
+  icon.classList.remove('green', 'yellow', 'red', 'base');
+
   if (!isActive) return;
+
+  // NEW: when comparison is meaningless (e.g., only 1 state), force "base"
+  if (forceBase) {
+    icon.classList.add('base');
+    return;
+  }
+
   const cls = tertileClassForValue(value, cuts);
   if (cls) icon.classList.add(cls);
 }
@@ -2613,26 +2689,34 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
       
 
       // NEW: Color the tech icons by tertile among ACTIVE states with ACTIVE scores
+      // NEW: If there's only one active state, don't compute tertiles (no comparison)
+      const forceBase = (activeStates.size <= 1);
+      
       setIconTertileClass(
         node,
         'solar-ordinance-score', 'solar-ordinance-icon',
         (ord.solarAvg != null),
         ord.solarAvg,
-        tertileCuts.state.solar
+        tertileCuts.state.solar,
+        { forceBase }
       );
+
       setIconTertileClass(
         node,
         'wind-ordinance-score', 'wind-ordinance-icon',
         (ord.windAvg != null),
         ord.windAvg,
-        tertileCuts.state.wind
+        tertileCuts.state.wind,
+        { forceBase }
       );
+
       setIconTertileClass(
         node,
         'storage-ordinance-score', 'storage-ordinance-icon',
         (ord.storageAvg != null),
         ord.storageAvg,
-        tertileCuts.state.storage
+        tertileCuts.state.storage,
+        { forceBase }
       );
 
       // NEW: show/hide siting blocks + set text based on Airtable 📍 States fields
