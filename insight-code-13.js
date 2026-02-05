@@ -88,6 +88,11 @@ const STATE_ABBR_TO_NAME = {
   let govMediaByState  = new Map();     // stateTitle -> Set<idx in allGovMedia>
   let govMediaLoadState = { loaded:false, loading:false, error:null };
 
+    // NEW: State siting classifications (Airtable 📍 States table)
+  let stateSitingByState = new Map(); 
+  let stateSitingByAbbr  = new Map(); 
+  let stateSitingLoadState = { loaded:false, loading:false, error:null };
+
   const projectsByCounty = new Map();
   const stateIndex = new Map(); // stateTitle -> { countyIds:Set, projectIdxs:Set }
 
@@ -200,6 +205,9 @@ wireUI();
 
 // Start Govt. & Media fetch in the background (does NOT block initial load)
 loadGovMediaDataInBackground();
+
+    // NEW: fetch state siting classifications (does NOT block initial load)
+loadStateSitingDataInBackground();
 
 // Enable the Federal Lands overlay toggle (no impact on your other logic)
 setupFederalLandsOverlay();
@@ -747,6 +755,106 @@ function setFieldOrRemove(root, field, value) {
   const v = value == null ? '' : String(value).trim();
   if (!v) { el.remove(); return; }
   el.textContent = v;
+}
+
+  // ==============================
+// STATES: Siting classification blocks (state-card-template)
+// ==============================
+
+function setStateSitingBlock(root, elementName, textFieldName, value) {
+  const wrap = root?.querySelector?.(`[data-element="${elementName}"]`);
+  if (!wrap) return;
+
+  const v = value == null ? '' : String(value).trim();
+
+  if (!v) {
+    // Hide entirely when empty (matches your “removed/hidden altogether” requirement)
+    wrap.style.display = 'none';
+    const t = wrap.querySelector(`[data-field="${textFieldName}"]`);
+    if (t) t.textContent = '';
+    return;
+  }
+
+  wrap.style.display = 'flex';
+  const textEl =
+    wrap.querySelector(`[data-field="${textFieldName}"]`) ||
+    root.querySelector(`[data-field="${textFieldName}"]`);
+
+  if (textEl) textEl.textContent = v;
+}
+
+function applyStateSitingBlocks(root, stateNameOrAbbr) {
+  const key = String(stateNameOrAbbr || '').trim();
+  const meta =
+    stateSitingByState.get(key) ||
+    stateSitingByAbbr.get(key.toUpperCase()) ||
+    null;
+
+  // If we don't have data yet (or no record), hide all 5 blocks
+  setStateSitingBlock(root, 'predominantly-state-siting', 'predominantly-state-siting-text', meta?.predominantlyStateSiting);
+  setStateSitingBlock(root, 'state-local-hybrid',         'state-local-hybrid-text',         meta?.stateLocalHybrid);
+  setStateSitingBlock(root, 'state-guardrails',           'state-guardrails-text',           meta?.stateGuardrails);
+  setStateSitingBlock(root, 'local-siting',               'local-siting-text',               meta?.localSiting);
+  setStateSitingBlock(root, 'minimal-siting',             'minimal-siting-text',             meta?.minimalSiting);
+}
+
+// Update any state cards already rendered into #states-list
+function refreshVisibleStateSitingUI() {
+  if (!listStatesEl) return;
+  Array.from(listStatesEl.children).forEach(node => {
+    const st = node?.dataset?.state;
+    if (!st) return;
+    applyStateSitingBlocks(node, st);
+  });
+}
+
+// Background fetch (mirrors your Govt/Media pattern; never blocks initial load)
+function loadStateSitingDataInBackground() {
+  if (stateSitingLoadState.loading || stateSitingLoadState.loaded) return;
+
+  stateSitingLoadState.loading = true;
+  stateSitingLoadState.error = null;
+
+  fetch(API_BASE + '/states')
+    .then(res => {
+      if (!res.ok) throw new Error('/states failed: ' + res.status);
+      return res.json();
+    })
+    .then(data => {
+      stateSitingByState.clear();
+      stateSitingByAbbr.clear();
+
+      (data.records || []).forEach(r => {
+        const abbr = String(r.abbr || r.abbreviation || '').trim().toUpperCase();
+        if (!abbr) return;
+
+        const meta = {
+          predominantlyStateSiting: String(r.predominantlyStateSiting || '').trim(),
+          stateLocalHybrid:         String(r.stateLocalHybrid || '').trim(),
+          stateGuardrails:          String(r.stateGuardrails || '').trim(),
+          localSiting:              String(r.localSiting || '').trim(),
+          minimalSiting:            String(r.minimalSiting || '').trim()
+        };
+
+        // Store by abbr (for robustness)
+        stateSitingByAbbr.set(abbr, meta);
+
+        // Store by full state name (matches your state cards)
+        const full = STATE_ABBR_TO_NAME[abbr] || '';
+        if (full) stateSitingByState.set(full, meta);
+      });
+
+      // Update any already-rendered state cards (no rerender needed)
+      refreshVisibleStateSitingUI();
+    })
+    .catch(err => {
+      console.error('State siting fetch failed', err);
+      stateSitingLoadState.error = err;
+    })
+    .finally(() => {
+      stateSitingLoadState.loading = false;
+      stateSitingLoadState.loaded = true;
+    });
 }
 
   // ==============================
@@ -2526,6 +2634,9 @@ function setIconTertileClass(root, wrapperName, iconName, isActive, value, cuts)
         ord.storageAvg,
         tertileCuts.state.storage
       );
+
+      // NEW: show/hide siting blocks + set text based on Airtable 📍 States fields
+      applyStateSitingBlocks(node, stateName);
       
       node.dataset.state = stateName;
       return node;
