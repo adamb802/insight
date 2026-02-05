@@ -3113,7 +3113,7 @@ function updateMapKey() {
   if (showMW) {
     mapKeyEl.innerHTML = css + `
       <div class="legend">
-        <div class="title">Energy Capacity</div>
+        <div class="title">Potential Energy Capacity</div>
         <div class="subtitle">Active MW (quintiles)</div>
         <div class="bar">${COLORS_MW_5.map(c=>`<div class="swatch" style="background:${c}"></div>`).join('')}</div>
         <div class="axis"><span>Low</span><span>High</span></div>
