@@ -945,11 +945,13 @@ function renderRegulatoryCardsInContainer(container, countyFips) {
     return;
   }
 
-  // Order: show ban/moratorium cards first (easy to scan), then link cards
-  bm.forEach(text => container.appendChild(makeBanMoratoriumRegCard(text)));
 
   if (hasJur) container.appendChild(makeJurisdictionalRegCard(countyName, jurUrl));
   if (hasOrd) container.appendChild(makeOrdinanceRegCard(countyName, ordUrl));
+
+  // Order: show ban/moratorium cards last (easy to scan), then link cards
+  bm.forEach(text => container.appendChild(makeBanMoratoriumRegCard(text)));
+
 }
 
 function makeJurisdictionalRegCard(countyName, url) {
