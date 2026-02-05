@@ -120,6 +120,8 @@ const STATE_ABBR_TO_NAME = {
   let savedCountyTemplate = null;
   let savedStateTemplate = null;
   let savedGovMediaTemplate = null; // NEW
+  let savedOrdinanceTemplate = null;       // NEW (Regulatory)
+  let savedJurisdictionalTemplate = null;  // NEW (Regulatory)
 
   let listCursorProjects = 0;
   let listCursorCounties = 0;
@@ -221,6 +223,22 @@ dismissLoadingUI();
         savedGovMediaTemplate.style.display = '';
         tGov.remove();
       }
+        // NEW: Regulatory templates
+    const tOrd = document.getElementById('ordinance-card-template');
+    if (tOrd) {
+      savedOrdinanceTemplate = tOrd.cloneNode(true);
+      savedOrdinanceTemplate.id = '';
+      savedOrdinanceTemplate.style.display = '';
+      tOrd.remove();
+    }
+
+    const tJur = document.getElementById('jurisdictional-card-template');
+    if (tJur) {
+      savedJurisdictionalTemplate = tJur.cloneNode(true);
+      savedJurisdictionalTemplate.id = '';
+      savedJurisdictionalTemplate.style.display = '';
+      tJur.remove();
+    }
   }
 
   async function initMap() {
@@ -353,7 +371,11 @@ async function loadData() {
     stateTitle: String(r.stateTitle || '').trim(),
     windScore:    parseScore(r.windScore ?? r.Wind_Score),
     solarScore:   parseScore(r.solarScore ?? r.Solar_Score),
-    storageScore: parseScore(r.storageScore ?? r.Storage_Score)
+    storageScore: parseScore(r.storageScore ?? r.Storage_Score),
+
+    // NEW: Regulatory URLs coming from Cloud Run /counties payload
+    jurisdictionalUrl: normalizeUrl(r.jurisdictionalUrl || ''),
+    zoningOrdinanceUrl: normalizeUrl(r.zoningOrdinanceUrl || '')
   })).filter(c => c.fips && c.title);
 
   countyById = new Map(allCounties.map(c => [c.fips, c]));
@@ -725,6 +747,83 @@ function setFieldOrRemove(root, field, value) {
   const v = value == null ? '' : String(value).trim();
   if (!v) { el.remove(); return; }
   el.textContent = v;
+}
+
+  // ==============================
+// REGULATORY (secondary tab)
+// ==============================
+
+// For Regulatory cards, templates use: [data-title="county-name"]
+function setDataTitle(root, key, value) {
+  const el = root?.querySelector?.(`[data-title="${key}"]`);
+  if (!el) return;
+  el.textContent = value == null ? '' : String(value);
+}
+
+// Render 0–2 cards (jurisdictional + ordinance) or the empty message
+function renderRegulatoryCardsInContainer(container, countyFips) {
+  if (!container) return;
+  clear(container);
+
+  const fips = String(countyFips || '').trim();
+  const c = fips ? countyById.get(fips) : null;
+
+  const countyName = String(c?.title || '').trim() || (fips || 'Unknown county');
+
+  const jurUrl = normalizeUrl(c?.jurisdictionalUrl || '');
+  const ordUrl = normalizeUrl(c?.zoningOrdinanceUrl || '');
+
+  const hasJur = !!jurUrl;
+  const hasOrd = !!ordUrl;
+
+  if (!hasJur && !hasOrd) {
+    const msg = document.createElement('div');
+    msg.className = 'dropdown-empty';
+    msg.textContent = 'The selected county does not currently have any regulatory information.';
+    container.appendChild(msg);
+    return;
+  }
+
+  if (hasJur) container.appendChild(makeJurisdictionalRegCard(countyName, jurUrl));
+  if (hasOrd) container.appendChild(makeOrdinanceRegCard(countyName, ordUrl));
+}
+
+function makeJurisdictionalRegCard(countyName, url) {
+  if (savedJurisdictionalTemplate) {
+    const node = savedJurisdictionalTemplate.cloneNode(true);
+
+    // Link entire card to URL (reusing your existing link helper)
+    attachGovMediaLink(node, url);
+
+    // Set the [data-title="county-name"] text
+    setDataTitle(node, 'county-name', countyName);
+
+    return node;
+  }
+
+  // Fallback if template is missing
+  const div = document.createElement('div');
+  div.style.cssText = 'border:1px solid #eee; padding:10px;';
+  div.textContent = `${countyName}`;
+  attachGovMediaLink(div, url);
+  return div;
+}
+
+function makeOrdinanceRegCard(countyName, url) {
+  if (savedOrdinanceTemplate) {
+    const node = savedOrdinanceTemplate.cloneNode(true);
+
+    attachGovMediaLink(node, url);
+    setDataTitle(node, 'county-name', countyName);
+
+    return node;
+  }
+
+  const div = document.createElement('div');
+  div.style.cssText = 'border:1px solid #eee; padding:10px;';
+  div.textContent = `${countyName}`;
+  attachGovMediaLink(div, url);
+  return div;
 }
 
   // --- County ID helpers (normalize to string) ---
@@ -1672,7 +1771,8 @@ function buildCountyDropdown(fips) {
     selectedValue: countyDropdownTab,
     options: [
       { value: 'projects', label: 'Projects' },
-      { value: 'media', label: 'Govt. & Media' }
+      { value: 'media', label: 'Govt. & Media' },
+      { value: 'regulatory', label: 'Regulatory' }
     ],
     onChange: (val) => { countyDropdownTab = val; renderCurrentList(true); }
   });
@@ -1685,6 +1785,7 @@ function buildCountyDropdown(fips) {
   list.className = 'project-list';
   wrap.appendChild(list);
   renderProjectCardsInContainer(list, Array.from(visibleProjectIdxs));
+
 } else if (countyDropdownTab === 'media') {
   const list = document.createElement('div');
   list.className = 'gov-media-list';
@@ -1692,6 +1793,15 @@ function buildCountyDropdown(fips) {
 
   // County -> only records linked to this county
   renderGovMediaCardsInContainer(list, govMediaIdxsForCounty(fips), 'county');
+
+} else if (countyDropdownTab === 'regulatory') {
+  const list = document.createElement('div');
+  list.className = 'regulatory-list';
+  wrap.appendChild(list);
+
+  // County -> show 0–2 regulatory cards based on county fields
+  renderRegulatoryCardsInContainer(list, fips);
+
 } else {
   const msg = document.createElement('div');
   msg.className = 'dropdown-empty';
@@ -1715,7 +1825,8 @@ function buildProjectDropdown(idx) {
     groupName: group,
     selectedValue: projectDropdownTab,
     options: [
-      { value: 'media', label: 'Govt. & Media' }
+      { value: 'media', label: 'Govt. & Media' },
+      { value: 'regulatory', label: 'Regulatory' } 
     ],
     onChange: (val) => { projectDropdownTab = val; renderCurrentList(true); }
   });
@@ -1727,9 +1838,20 @@ function buildProjectDropdown(idx) {
     const list = document.createElement('div');
     list.className = 'gov-media-list';
     wrap.appendChild(list);
-  
+
     // Project -> records linked to the project's associated county (primary countyIds[0])
     renderGovMediaCardsInContainer(list, govMediaIdxsForProject(idx), 'project');
+
+  } else if (projectDropdownTab === 'regulatory') {
+    const list = document.createElement('div');
+    list.className = 'regulatory-list';
+    wrap.appendChild(list);
+
+    // Project -> regulatory cards for the project's primary county
+    const p = allProjects[idx];
+    const primaryFips = (p && Array.isArray(p.countyIds) && p.countyIds[0]) ? String(p.countyIds[0]) : '';
+    renderRegulatoryCardsInContainer(list, primaryFips);
+
   } else {
     const msg = document.createElement('div');
     msg.className = 'dropdown-empty';
@@ -2981,7 +3103,8 @@ function updateMapKey() {
       .dropdown-tab-container { margin-bottom: 10px; }
       .dropdown-list .project-list,
       .dropdown-list .counties-list,
-      .dropdown-list .gov-media-list {
+      .dropdown-list .gov-media-list,
+      .dropdown-list .regulatory-list {
         display: flex;
         flex-direction: column;
         gap: 10px;
